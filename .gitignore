@@ -1,0 +1,21 @@
+# Entornos virtuales de Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Dependencias de Node / React
+node_modules/
+dist/
+build/
+
+# Archivos de configuración local y claves
+.env
+.env.local
+
+# Archivos de descarga temporales que genera tu backend
+descargas_temp/
+*.zip
+*.tif
+*.geotiff
