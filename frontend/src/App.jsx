@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { MapContainer, TileLayer, useMapEvents, useMap, Polygon, Polyline, CircleMarker } from 'react-leaflet';
+import React, { useState, useRef, useEffect } from 'react';
+import { MapContainer, TileLayer, useMapEvents, useMap, Polygon, Polyline, CircleMarker, Popup } from 'react-leaflet';
 import axios from 'axios';
 import shp from 'shpjs';
 import L from 'leaflet';
@@ -12,7 +12,7 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
 
-const API_BASE_URL = 'http://127.0.0.1:8000/api';
+const API_BASE_URL = import.meta.env?.VITE_API_URL ?? 'http://127.0.0.1:8000/api';
 
 const MAPAS_BASE = {
   "Google Satélite": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
@@ -188,62 +188,80 @@ const obtenerFechasDefecto = () => {
   return { inicio: formatoFecha(haceSeisMeses), fin: formatoFecha(hoy) };
 };
 
-const calcularAreaGeoJSONHa = (geojson) => {
-  try {
-    if (!geojson || !geojson.features || !geojson.features[0]) return 0;
-    const geom = geojson.features[0].geometry;
-    if (geom.type !== "Polygon") return 0;
-    const coords = geom.coordinates[0];
-    let area = 0;
-    const n = coords.length;
-    if (n < 3) return 0;
-    for (let i = 0; i < n - 1; i++) {
-      const p1 = coords[i];
-      const p2 = coords[i + 1];
-      area += (p2[0] - p1[0]) * (p2[1] + p1[1]);
-    }
-    area = Math.abs(area / 2.0);
-    const latPromedio = coords[0][1] * (Math.PI / 180);
-    const m2 = area * 111320 * (111320 * Math.cos(latPromedio));
-    return (m2 / 10000.0).toFixed(1);
-  } catch (e) {
-    return 0;
+// ---------- Geometría ----------
+const RADIO_TIERRA = 6378137;
+const aRad = (g) => (g * Math.PI) / 180;
+
+const areaAnilloM2 = (anillo) => {
+  let suma = 0;
+  for (let i = 0; i < anillo.length - 1; i++) {
+    const [x1, y1] = anillo[i];
+    const [x2, y2] = anillo[i + 1];
+    suma += aRad(x2 - x1) * (2 + Math.sin(aRad(y1)) + Math.sin(aRad(y2)));
   }
+  return Math.abs((suma * RADIO_TIERRA * RADIO_TIERRA) / 2);
 };
 
-function ManejadorEventosMapa({ modoIdentificar, modoMedir, modoDibujar, escenaSeleccionada, modoViz, setDatosPixel, setCargandoPixel, setPuntosMedicion, setPuntosPoligono, setCentroMapa, setPosicionPixelInfo }) {
-  useMapEvents({
-    click: async (e) => {
-      setCentroMapa(null);
-      if (modoDibujar) {
-        setPuntosPoligono(prev => [...prev, [e.latlng.lat, e.latlng.lng]]);
-        return;
-      }
-      if (modoMedir) {
-        setPuntosMedicion(prev => [...prev, [e.latlng.lat, e.latlng.lng]]);
-        return;
-      }
-      if (modoIdentificar && escenaSeleccionada) {
-        const coords = [e.latlng.lat, e.latlng.lng];
-        setPosicionPixelInfo(coords);
-        setCargandoPixel(true);
-        setDatosPixel(null);
-        try {
-          const res = await axios.post(`${API_BASE_URL}/identificar-pixel`, {
-            escena_id: escenaSeleccionada.id,
-            lat: e.latlng.lat,
-            lng: e.latlng.lng,
-            indice: modoViz
-          });
-          setDatosPixel(res.data);
-        } catch (err) {
-          setDatosPixel({ error: "Error de lectura" });
-        } finally {
-          setCargandoPixel(false);
-        }
-      }
-    }
+const areaPoligonoM2 = (anillos) =>
+  anillos.reduce((acc, anillo, i) => acc + (i === 0 ? areaAnilloM2(anillo) : -areaAnilloM2(anillo)), 0);
+
+const areaGeometriaM2 = (g) => {
+  if (!g) return 0;
+  if (g.type === 'Polygon') return areaPoligonoM2(g.coordinates);
+  if (g.type === 'MultiPolygon') return g.coordinates.reduce((acc, p) => acc + areaPoligonoM2(p), 0);
+  return 0;
+};
+
+const calcularAreaGeoJSONHa = (geojson) => {
+  const feats = geojson?.type === 'FeatureCollection' ? geojson.features : [geojson];
+  const m2 = (feats || []).reduce((acc, f) => acc + areaGeometriaM2(f?.geometry), 0);
+  return (m2 / 10000).toFixed(1);
+};
+
+// Anillos exteriores en formato Leaflet [lat, lng] (soporta Polygon y MultiPolygon)
+const extraerContornos = (fc) => {
+  const salida = [];
+  (fc?.features || []).forEach((f) => {
+    const g = f?.geometry;
+    if (!g) return;
+    const polis = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    polis.forEach((p) => salida.push(p[0].map((c) => [c[1], c[0]])));
   });
+  return salida;
+};
+
+const quitarZ = (c) => (typeof c[0] === 'number' ? [c[0], c[1]] : c.map(quitarZ));
+
+const distanciaTotalM = (pts) =>
+  pts.reduce((acc, p, i) => (i === 0 ? 0 : acc + L.latLng(pts[i - 1]).distanceTo(L.latLng(p))), 0);
+
+const formatoDistancia = (m) => (m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`);
+
+const familiaDe = (escena) =>
+  escena?.satelite && escena.satelite.toLowerCase().includes('landsat') ? 'Landsat' : 'Sentinel-2';
+
+const colorPaleta = (c) => (c.startsWith('#') ? c : `#${c}`);
+
+const placeholderSvg = (texto) =>
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' width='100' height='70'><rect width='100' height='70' fill='#11151c'/><text x='50' y='38' fill='#8b95a5' font-size='10' text-anchor='middle' font-family='sans-serif'>${texto}</text></svg>`
+  );
+
+const guardarBlob = (data, nombre) => {
+  const url = window.URL.createObjectURL(new Blob([data]));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombre;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+};
+
+// ---------- Componentes de mapa ----------
+function ManejadorEventosMapa({ onClick }) {
+  useMapEvents({ click: (e) => onClick(e.latlng) });
   return null;
 }
 
@@ -257,15 +275,73 @@ function ControlZoomLeaflet({ mapRef }) {
   );
 }
 
-function ControllerCentradoMapa({ centro }) {
+// Antes llamaba a flyTo durante el render (se repetía en cada re-render). Ahora es un efecto.
+function ControllerCentradoMapa({ destino }) {
   const map = useMap();
-  if (centro) map.flyTo(centro, 13);
+  useEffect(() => {
+    if (!destino?.coords?.length) return;
+    if (destino.coords.length === 1) map.flyTo(destino.coords[0], 13);
+    else map.fitBounds(L.latLngBounds(destino.coords), { padding: [70, 70], maxZoom: 17 });
+  }, [destino, map]);
   return null;
 }
 
+function LeyendaIndice({ titulo, vis, bottom }) {
+  if (!vis?.palette) return null;
+  const degradado = `linear-gradient(to right, ${vis.palette.map(colorPaleta).join(', ')})`;
+  return (
+    <div style={{ position: 'absolute', left: '16px', bottom, zIndex: 1000, width: '190px', backgroundColor: 'rgba(18, 23, 32, 0.92)', border: `1px solid ${COLOR.border}`, borderRadius: COLOR.radius, padding: '6px 8px', transition: 'bottom 0.25s ease' }}>
+      <div style={{ fontSize: '11px', fontWeight: '600', color: COLOR.text, marginBottom: '4px' }}>{titulo}</div>
+      <div style={{ height: '8px', borderRadius: '2px', background: degradado }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: COLOR.textDim, marginTop: '2px' }}>
+        <span>{vis.min}</span>
+        <span>{vis.max}</span>
+      </div>
+    </div>
+  );
+}
+
+function GraficoSerie({ puntos, indice }) {
+  if (!puntos?.length) {
+    return <div style={{ fontSize: '11px', color: COLOR.textDim, padding: '10px 0' }}>No hay datos válidos en el período (nubes o sin pasadas del satélite). Amplía las fechas o los sensores.</div>;
+  }
+  const W = 278, H = 160, m = { l: 34, r: 8, t: 8, b: 22 };
+  const tiempos = puntos.map((p) => new Date(p.fecha).getTime());
+  const valores = puntos.map((p) => p.valor);
+  const t0 = Math.min(...tiempos), t1 = Math.max(...tiempos);
+  const rango = Math.max(...valores) - Math.min(...valores) || 0.1;
+  const lo = Math.min(...valores) - rango * 0.1, hi = Math.max(...valores) + rango * 0.1;
+  const x = (t) => m.l + (t1 === t0 ? (W - m.l - m.r) / 2 : ((t - t0) / (t1 - t0)) * (W - m.l - m.r));
+  const y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
+  const linea = puntos.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(tiempos[i]).toFixed(1)},${y(p.valor).toFixed(1)}`).join(' ');
+  const marcas = [0, 1, 2, 3].map((i) => lo + ((hi - lo) * i) / 3);
+  const corta = (f) => f.slice(2).replace(/-/g, '/');
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label={`Serie temporal de ${indice}`}>
+      {marcas.map((v) => (
+        <g key={v}>
+          <line x1={m.l} x2={W - m.r} y1={y(v)} y2={y(v)} stroke={COLOR.borderSoft} />
+          <text x={m.l - 4} y={y(v) + 3} fill={COLOR.textDim} fontSize="9" textAnchor="end">{v.toFixed(2)}</text>
+        </g>
+      ))}
+      <path d={linea} fill="none" stroke={COLOR.textFaint} strokeWidth="1.25" />
+      {puntos.map((p, i) => (
+        <circle key={`${p.fecha}_${p.sat}`} cx={x(tiempos[i])} cy={y(p.valor)} r="3" fill={p.sat === 'Landsat' ? '#f59e0b' : COLOR.accent}>
+          <title>{`${p.fecha} · ${p.sat}: ${p.valor}`}</title>
+        </circle>
+      ))}
+      <text x={m.l} y={H - 6} fill={COLOR.textDim} fontSize="9">{corta(puntos[0].fecha)}</text>
+      <text x={W - m.r} y={H - 6} fill={COLOR.textDim} fontSize="9" textAnchor="end">{corta(puntos[puntos.length - 1].fecha)}</text>
+    </svg>
+  );
+}
+
+// ---------- App ----------
 export default function App() {
   const fileInputRef = useRef(null);
   const mapInstanceRef = useRef(null);
+  const peticionEscenaRef = useRef(0);
+  const toastTimerRef = useRef(null);
   const fechasDefecto = obtenerFechasDefecto();
 
   const [dockExpanded, setDockExpanded] = useState(false);
@@ -276,12 +352,9 @@ export default function App() {
 
   const [modoViz, setModoViz] = useState("RGB Clásico");
   const [pestañaCapa, setPestañaCapa] = useState("TODAS LAS CAPAS");
-  const [urlCapaIndice, setUrlCapaIndice] = useState(null);
-  const [urlCapaAmbientacion, setUrlCapaAmbientacion] = useState(null);
-  const [urlCapaBordes, setUrlCapaBordes] = useState(null);
   const [cargando, setCargando] = useState(false);
   const [descargandoRaster, setDescargandoRaster] = useState(false);
-  const [mapaBaseActual, setMapaBaseActual] = useState("Google Satélite");
+  const [mapaBaseActual, setMapaBaseActual] = useState("Esri Satélite HD");
 
   const [inputBusqueda, setInputBusqueda] = useState("");
   const [centroMapa, setCentroMapa] = useState(null);
@@ -289,18 +362,16 @@ export default function App() {
 
   const [fechaInicio, setFechaInicio] = useState(fechasDefecto.inicio);
   const [fechaFin, setFechaFin] = useState(fechasDefecto.fin);
-  const [nubosidadMax, setNubosidadMax] = useState(20.0);
+  const [nubosidadMax, setNubosidadMax] = useState(20);
   const [subtildesActivas, setSubtildesActivas] = useState(["S2A_L2A", "S2B_L2A", "L8_T1", "L9_T1"]);
-
+  const [enmascararNubes, setEnmascararNubes] = useState(true);
   const [mostrarFiltrosBusqueda, setMostrarFiltrosBusqueda] = useState(true);
 
   const [mostrarPanelResultadosZonas, setMostrarPanelResultadosZonas] = useState(false);
-  const [zonasCalculadas, setZonasCalculadas] = useState(false);
-  const [indiceOrigen, setIndiceOrigen] = useState(null);
-
   const [indiceAmbientacion, setIndiceAmbientacion] = useState("NDVI");
   const [clasesAmbientacion, setClasesAmbientacion] = useState(3);
   const [superficieMinM2, setSuperficieMinM2] = useState(2000);
+  const [metodoZonas, setMetodoZonas] = useState("cuantiles");
   const [rellenosActivos, setRellenosActivos] = useState(true);
   const [opacidadAmbientacion, setOpacidadAmbientacion] = useState(80);
   const [unidadMetrica, setUnidadMetrica] = useState("ha");
@@ -308,6 +379,7 @@ export default function App() {
   const [modoIdentificar, setModoIdentificar] = useState(false);
   const [modoMedir, setModoMedir] = useState(false);
   const [modoDibujar, setModoDibujar] = useState(false);
+  const [modoTendencia, setModoTendencia] = useState(false);
 
   const [puntosMedicion, setPuntosMedicion] = useState([]);
   const [puntosPoligono, setPuntosPoligono] = useState([]);
@@ -315,14 +387,62 @@ export default function App() {
   const [posicionPixelInfo, setPosicionPixelInfo] = useState(null);
   const [cargandoPixel, setCargandoPixel] = useState(false);
 
-  const [mostrarMenuMapas, setMostrarMenuMapas] = useState(false);
+  const [indiceTendencia, setIndiceTendencia] = useState("NDVI");
+  const [puntoTendencia, setPuntoTendencia] = useState(null);
+  const [serieTendencia, setSerieTendencia] = useState(null);
+  const [cargandoSerie, setCargandoSerie] = useState(false);
 
-  // --- ESTADOS PARA MODAL DE DESCARGA DE ESCENA COMPLETA (BANDAS) ---
+  const [mostrarMenuMapas, setMostrarMenuMapas] = useState(false);
+  const [toast, setToast] = useState(null);
+
   const [modalDescargaAbierto, setModalDescargaAbierto] = useState(false);
   const [escenaModal, setEscenaModal] = useState(null);
   const [bandasSeleccionadas, setBandasSeleccionadas] = useState([]);
 
+  // Todo lo que depende del lote vive en el propio lote: al cambiar de pestaña no se mezclan capas ni zonas.
   const loteActual = lotes.find(l => l.id === loteActivoId) || null;
+  const urlCapaIndice = loteActual?.tileUrl || null;
+  const visActual = loteActual?.vis || null;
+  const ambientacion = loteActual?.ambientacion || null;
+  const urlCapaAmbientacion = ambientacion?.tileUrl || null;
+  const urlCapaBordes = ambientacion?.bordesUrl || null;
+  const zonasCalculadas = !!ambientacion;
+
+  const actualizarLote = (id, cambios) =>
+    setLotes(prev => prev.map(l => (l.id === id ? { ...l, ...cambios } : l)));
+
+  // ---------- Avisos ----------
+  const avisar = (texto, tipo = 'error') => {
+    setToast({ texto, tipo });
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 6000);
+  };
+
+  const mensajeError = async (err, base) => {
+    let detalle = err?.response?.data?.detail;
+    if (!detalle && err?.response?.data instanceof Blob) {
+      try { detalle = JSON.parse(await err.response.data.text()).detail; } catch (_) { /* sin detalle */ }
+    }
+    if (Array.isArray(detalle)) detalle = detalle.map(d => d.msg).join('; ');
+    if (!detalle && !err?.response) detalle = 'No se pudo conectar con el servidor.';
+    return detalle ? `${base}: ${detalle}` : base;
+  };
+
+  // ---------- Herramientas del mapa ----------
+  const activarHerramienta = (nombre) => {
+    setModoDibujar(nombre === 'dibujar' ? !modoDibujar : false);
+    setModoIdentificar(nombre === 'identificar' ? !modoIdentificar : false);
+    setModoMedir(nombre === 'medir' ? !modoMedir : false);
+    setModoTendencia(false);
+    if (nombre !== 'identificar') { setPosicionPixelInfo(null); setDatosPixel(null); }
+  };
+
+  const irASeccion = (seccion) => {
+    setSeccionActiva(seccion);
+    const esTendencia = seccion === 'tendencia';
+    setModoTendencia(esTendencia);
+    if (esTendencia) { setModoDibujar(false); setModoIdentificar(false); setModoMedir(false); }
+  };
 
   const toggleSubtilde = (subId) => {
     setSubtildesActivas(prev => prev.includes(subId) ? prev.filter(id => id !== subId) : [...prev, subId]);
@@ -332,46 +452,107 @@ export default function App() {
     setLoteActivoId(id);
     const l = lotes.find(item => item.id === id);
     if (l) {
-      setUrlCapaIndice(l.tileUrl || null);
-      if (l.puntosCoords && l.puntosCoords.length > 0) setCentroMapa(l.puntosCoords[0]);
+      setMostrarPanelResultadosZonas(false);
+      if (l.puntosCoords.length > 0) setCentroMapa({ coords: l.puntosCoords, t: Date.now() });
     }
   };
 
   const eliminarLote = (id, e) => {
     e.stopPropagation();
-    const nuevosLotes = lotes.filter(l => l.id !== id);
-    setLotes(nuevosLotes);
-    if (loteActivoId === id) {
-      if (nuevosLotes.length > 0) {
-        setLoteActivoId(nuevosLotes[0].id);
-        setUrlCapaIndice(nuevosLotes[0].tileUrl || null);
-      } else {
-        setLoteActivoId(null);
-        setUrlCapaIndice(null);
-      }
+    const restantes = lotes.filter(l => l.id !== id);
+    setLotes(restantes);
+    if (loteActivoId === id) setLoteActivoId(restantes.length > 0 ? restantes[0].id : null);
+  };
+
+  const agregarLote = ({ nombre, origen, geojson, contornos }) => {
+    const nuevo = {
+      id: `lote_${Date.now()}`,
+      nombre,
+      origen,
+      superficieHa: calcularAreaGeoJSONHa(geojson),
+      geojson,
+      contornos,
+      puntosCoords: contornos.flat(),
+      escenas: [],
+      buscada: false,
+      escenaSeleccionada: null,
+      tileUrl: null,
+      vis: null,
+      ambientacion: null
+    };
+    setLotes(prev => [...prev, nuevo]);
+    setLoteActivoId(nuevo.id);
+    setMostrarPanelResultadosZonas(false);
+    return nuevo;
+  };
+
+  const manejarClickMapa = async ({ lat, lng }) => {
+    if (modoDibujar) { setPuntosPoligono(prev => [...prev, [lat, lng]]); return; }
+    if (modoMedir) { setPuntosMedicion(prev => [...prev, [lat, lng]]); return; }
+    if (modoTendencia) { cargarSerie(lat, lng); return; }
+    if (!modoIdentificar) return;
+    if (!loteActual?.escenaSeleccionada) {
+      avisar('Selecciona una escena para consultar el valor del píxel.', 'info');
+      return;
+    }
+    setPosicionPixelInfo([lat, lng]);
+    setCargandoPixel(true);
+    setDatosPixel(null);
+    try {
+      const res = await axios.post(`${API_BASE_URL}/identificar-pixel`, {
+        escena_id: loteActual.escenaSeleccionada.id, lat, lng, indice: modoViz, enmascarar_nubes: enmascararNubes
+      });
+      setDatosPixel(res.data);
+    } catch (err) {
+      setDatosPixel({ error: await mensajeError(err, 'Error de lectura') });
+    } finally {
+      setCargandoPixel(false);
     }
   };
 
-  const buscarEscenas = async () => {
-    if (!loteActual) {
-      alert("Por favor delimita o sube un lote primero.");
-      return;
+  // ---------- Búsqueda de ubicación (coordenadas o nombre) ----------
+  const buscarUbicacion = async () => {
+    const q = inputBusqueda.trim();
+    if (!q) return;
+    const coord = q.match(/^(-?\d+(?:[.,]\d+)?)\s*[,;\s]\s*(-?\d+(?:[.,]\d+)?)$/);
+    if (coord) {
+      const lat = parseFloat(coord[1].replace(',', '.'));
+      const lng = parseFloat(coord[2].replace(',', '.'));
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        setCentroMapa({ coords: [[lat, lng]], t: Date.now() });
+        return;
+      }
     }
+    try {
+      const res = await axios.get('https://nominatim.openstreetmap.org/search', { params: { q, format: 'json', limit: 1 } });
+      const r = res.data[0];
+      if (!r) { avisar(`No se encontró "${q}".`, 'info'); return; }
+      const [s, n, w, e] = r.boundingbox.map(Number);
+      setCentroMapa({ coords: [[s, w], [n, e]], t: Date.now() });
+    } catch (err) {
+      avisar('No se pudo buscar la ubicación.');
+    }
+  };
+
+  // ---------- Escenas ----------
+  const buscarEscenas = async () => {
+    if (!loteActual) { avisar('Dibuja o sube un lote antes de buscar imágenes.', 'info'); return; }
+    if (subtildesActivas.length === 0) { avisar('Activa al menos un sensor.', 'info'); return; }
+    const loteId = loteActivoId;
     setCargando(true);
     try {
       const res = await axios.post(`${API_BASE_URL}/buscar-escenas`, {
         geojson: loteActual.geojson,
         fecha_inicio: fechaInicio,
         fecha_fin: fechaFin,
-        nubosidad_max: parseFloat(nubosidadMax),
+        nubosidad_max: Number(nubosidadMax),
         sensores: subtildesActivas
       });
-
-      const escenasObtenidas = res.data.escenas || [];
-      setLotes(prev => prev.map(l => l.id === loteActivoId ? { ...l, escenas: escenasObtenidas, escenaSeleccionada: null } : l));
-      setUrlCapaIndice(null);
+      const escenas = res.data.escenas || [];
+      actualizarLote(loteId, { escenas, buscada: true, escenaSeleccionada: null, tileUrl: null, vis: null, ambientacion: null });
+      setMostrarPanelResultadosZonas(false);
     } catch (err) {
-      alert("Error buscando escenas satelitales.");
+      avisar(await mensajeError(err, 'Error buscando escenas'));
     } finally {
       setCargando(false);
     }
@@ -379,136 +560,124 @@ export default function App() {
 
   const seleccionarEscena = async (escenaObj, modo = modoViz) => {
     if (!loteActual) return;
+    const loteId = loteActivoId;
+    const cambioEscena = loteActual.escenaSeleccionada?.id !== escenaObj.id;
+    const peticion = ++peticionEscenaRef.current; // descarta respuestas viejas si el usuario clickea rápido
     setModoViz(modo);
-    if (zonasCalculadas && modo !== indiceOrigen) {
-      restablecerAmbientacion();
-    }
     setCargando(true);
     try {
-      const resCapa = await axios.post(`${API_BASE_URL}/obtener-capa`, {
-        escena_id: escenaObj.id,
-        modo_viz: modo,
-        geojson: loteActual.geojson
+      const res = await axios.post(`${API_BASE_URL}/obtener-capa`, {
+        escena_id: escenaObj.id, modo_viz: modo, enmascarar_nubes: enmascararNubes
       });
-      setUrlCapaIndice(resCapa.data.tile_url);
-      setLotes(prev => prev.map(l => l.id === loteActivoId ? { ...l, escenaSeleccionada: escenaObj, tileUrl: resCapa.data.tile_url } : l));
+      if (peticion !== peticionEscenaRef.current) return;
+      setLotes(prev => prev.map(l => l.id !== loteId ? l : {
+        ...l,
+        escenaSeleccionada: escenaObj,
+        tileUrl: res.data.tile_url,
+        vis: res.data.vis,
+        // las zonas pertenecen a una escena: si cambia la escena, ya no valen
+        ambientacion: cambioEscena ? null : l.ambientacion
+      }));
+      if (cambioEscena) setMostrarPanelResultadosZonas(false);
     } catch (err) {
-      console.error(err);
+      if (peticion === peticionEscenaRef.current) avisar(await mensajeError(err, 'No se pudo cargar la capa'));
     } finally {
-      setCargando(false);
+      if (peticion === peticionEscenaRef.current) setCargando(false);
     }
   };
 
-  {/* FUNCIONALIDAD MODAL DESCARGA ESCENA COMPLETA */}
+  // ---------- Descargas ----------
   const abrirModalDescargaEscena = (escenaObj, e) => {
     e.stopPropagation();
     setEscenaModal(escenaObj);
-    const esLandsat = escenaObj.satelite && escenaObj.satelite.toLowerCase().includes('landsat');
-    const familia = esLandsat ? "Landsat" : "Sentinel-2";
-    const listaInicial = BANDAS_DISPONIBLES[familia].map(b => b.id);
-    setBandasSeleccionadas(listaInicial);
+    setBandasSeleccionadas(BANDAS_DISPONIBLES[familiaDe(escenaObj)].map(b => b.id));
     setModalDescargaAbierto(true);
   };
 
   const toggleBandaModal = (bandaId) => {
-    setBandasSeleccionadas(prev =>
-      prev.includes(bandaId) ? prev.filter(b => b !== bandaId) : [...prev, bandaId]
-    );
+    setBandasSeleccionadas(prev => prev.includes(bandaId) ? prev.filter(b => b !== bandaId) : [...prev, bandaId]);
   };
 
   const toggleTodasBandasModal = (todas) => {
     if (!escenaModal) return;
-    const esLandsat = escenaModal.satelite && escenaModal.satelite.toLowerCase().includes('landsat');
-    const familia = esLandsat ? "Landsat" : "Sentinel-2";
-    if (todas) {
-      setBandasSeleccionadas(BANDAS_DISPONIBLES[familia].map(b => b.id));
-    } else {
-      setBandasSeleccionadas([]);
-    }
+    setBandasSeleccionadas(todas ? BANDAS_DISPONIBLES[familiaDe(escenaModal)].map(b => b.id) : []);
+  };
+
+  const avisarEscala = (response) => {
+    const escala = response.headers?.['x-escala-usada'];
+    if (escala) avisar(`Descarga lista. Para respetar el límite de tamaño se usó un píxel de ${escala} m.`, 'info');
   };
 
   const ejecutarDescargaEscenaBandas = async () => {
     if (!escenaModal || !loteActual) return;
-    if (bandasSeleccionadas.length === 0) {
-      alert("Selecciona al menos una banda para descargar.");
-      return;
-    }
+    if (bandasSeleccionadas.length === 0) { avisar('Selecciona al menos una banda.', 'info'); return; }
     setDescargandoRaster(true);
     try {
       const response = await axios.post(`${API_BASE_URL}/descargar-escena-bandas`, {
-        escena_id: escenaModal.id,
-        bandas: bandasSeleccionadas,
-        geojson: loteActual.geojson
+        escena_id: escenaModal.id, bandas: bandasSeleccionadas, geojson: loteActual.geojson
       }, { responseType: 'blob' });
-
-      const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', `${loteActual.nombre}_${escenaModal.satelite}_${escenaModal.fecha}_bandas.zip`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      guardarBlob(response.data, `${loteActual.nombre}_${escenaModal.satelite}_${escenaModal.fecha}_bandas.zip`);
+      avisarEscala(response);
       setModalDescargaAbierto(false);
     } catch (err) {
-      alert("Error al descargar la escena multibanda.");
+      avisar(await mensajeError(err, 'Error al descargar las bandas'));
     } finally {
       setDescargandoRaster(false);
     }
   };
 
-  {/* FUNCIÓN DE DESCARGA RASTER NATIVA A RESOLUCIÓN ORIGINAL */}
   const descargarIndiceOriginal = async (formato = 'geotiff') => {
-    if (!loteActual || !loteActual.escenaSeleccionada) {
-      alert("Selecciona una escena e índice para descargar.");
-      return;
-    }
+    if (!loteActual?.escenaSeleccionada) { avisar('Selecciona una escena e índice para descargar.', 'info'); return; }
     setDescargandoRaster(true);
     try {
       const response = await axios.post(`${API_BASE_URL}/descargar-raster`, {
         escena_id: loteActual.escenaSeleccionada.id,
         modo_viz: modoViz,
         geojson: loteActual.geojson,
-        formato: formato
+        formato,
+        enmascarar_nubes: enmascararNubes
       }, { responseType: 'blob' });
-
-      const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
       const extension = formato === 'geotiff' ? 'tif' : 'png';
-      link.setAttribute('download', `${loteActual.nombre}_${modoViz}_${loteActual.escenaSeleccionada.fecha}.${extension}`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      guardarBlob(response.data, `${loteActual.nombre}_${modoViz}_${loteActual.escenaSeleccionada.fecha}.${extension}`);
+      avisarEscala(response);
     } catch (err) {
-      alert("Error al descargar la capa raster en resolución nativa.");
+      avisar(await mensajeError(err, 'Error al descargar la capa'));
     } finally {
       setDescargandoRaster(false);
     }
   };
 
+  // ---------- Zonas de manejo ----------
   const ejecutarAmbientacion = async () => {
-    if (!loteActual || !loteActual.escenaSeleccionada) {
-      alert("Selecciona primero una escena satelital.");
-      return;
-    }
+    if (!loteActual?.escenaSeleccionada) { avisar('Selecciona primero una escena satelital.', 'info'); return; }
+    const loteId = loteActivoId;
+    const params = {
+      escena_id: loteActual.escenaSeleccionada.id,
+      indice: indiceAmbientacion,
+      num_clusters: Math.min(5, Math.max(2, parseInt(clasesAmbientacion, 10) || 3)),
+      superficie_min_m2: parseFloat(superficieMinM2) || 0,
+      metodo: metodoZonas,
+      enmascarar_nubes: enmascararNubes,
+      geojson: loteActual.geojson
+    };
     setCargando(true);
     try {
-      const res = await axios.post(`${API_BASE_URL}/clusterizar-lote`, {
-        escena_id: loteActual.escenaSeleccionada.id,
-        indice: indiceAmbientacion,
-        num_clusters: parseInt(clasesAmbientacion),
-        superficie_min_m2: parseFloat(superficieMinM2),
-        geojson: loteActual.geojson
+      const res = await axios.post(`${API_BASE_URL}/clusterizar-lote`, params);
+      actualizarLote(loteId, {
+        ambientacion: {
+          tileUrl: res.data.tile_url,
+          bordesUrl: res.data.border_tile_url,
+          zonas: res.data.zonas || [],
+          cortes: res.data.cortes || [],
+          areaTotalHa: res.data.area_total_ha,
+          areaSinDatoHa: res.data.area_sin_dato_ha,
+          indice: indiceAmbientacion,
+          params
+        }
       });
-
-      setUrlCapaAmbientacion(res.data.tile_url);
-      setUrlCapaBordes(res.data.border_tile_url);
-      setLotes(prev => prev.map(l => l.id === loteActivoId ? { ...l, leyendaClusters: res.data.zonas || [] } : l));
-      setZonasCalculadas(true);
-      setIndiceOrigen(indiceAmbientacion);
       setMostrarPanelResultadosZonas(true);
     } catch (err) {
-      alert("Error procesando las Zonas de Manejo.");
+      avisar(await mensajeError(err, 'Error procesando las zonas de manejo'));
     } finally {
       setCargando(false);
     }
@@ -517,76 +686,78 @@ export default function App() {
   const restablecerAmbientacion = () => {
     setClasesAmbientacion(3);
     setSuperficieMinM2(2000);
-    setUrlCapaAmbientacion(null);
-    setUrlCapaBordes(null);
-    setZonasCalculadas(false);
-    setIndiceOrigen(null);
+    setMetodoZonas("cuantiles");
+    if (loteActivoId) actualizarLote(loteActivoId, { ambientacion: null });
     setMostrarPanelResultadosZonas(false);
   };
 
+  const descargarVectorZonas = async (formato) => {
+    if (!ambientacion) return;
+    setDescargandoRaster(true);
+    try {
+      const response = await axios.post(`${API_BASE_URL}/descargar-vector-ambientacion`, { ...ambientacion.params, formato }, { responseType: 'blob' });
+      guardarBlob(response.data, `${loteActual.nombre}_zonas_${ambientacion.indice}_${formato}.zip`);
+    } catch (err) {
+      avisar(await mensajeError(err, 'Error al exportar las zonas'));
+    } finally {
+      setDescargandoRaster(false);
+    }
+  };
+
+  // ---------- Tendencia vegetal ----------
+  const cargarSerie = async (lat, lng, indice = indiceTendencia) => {
+    setPuntoTendencia([lat, lng]);
+    setCargandoSerie(true);
+    setSerieTendencia(null);
+    try {
+      const res = await axios.post(`${API_BASE_URL}/serie-temporal-pixel`, {
+        lat, lng, indice,
+        fecha_inicio: fechaInicio,
+        fecha_fin: fechaFin,
+        sensores: subtildesActivas,
+        enmascarar_nubes: enmascararNubes
+      });
+      setSerieTendencia(res.data.puntos || []);
+    } catch (err) {
+      avisar(await mensajeError(err, 'Error obteniendo la serie temporal'));
+    } finally {
+      setCargandoSerie(false);
+    }
+  };
+
+  // ---------- Carga y dibujo de lotes ----------
   const manejarCargaArchivo = async (e) => {
     const file = e.target.files[0];
+    e.target.value = ''; // permite volver a subir el mismo archivo
     if (!file) return;
     try {
-      let geojsonResultado = file.name.endsWith('.zip') ? await shp(await file.arrayBuffer()) : JSON.parse(await file.text());
-      let featureCollection = Array.isArray(geojsonResultado) ? geojsonResultado[0] : geojsonResultado;
-      if (featureCollection.type !== "FeatureCollection") featureCollection = { type: "FeatureCollection", features: [featureCollection] };
-
-      const areaCalculada = calcularAreaGeoJSONHa(featureCollection);
-      const geom = featureCollection.features[0].geometry;
-      let coordsLeaflet = geom.type === "Polygon" ? geom.coordinates[0].map(c => [c[1], c[0]]) : [];
-
-      const nuevoLote = {
-        id: `lote_${Date.now()}`,
-        nombre: file.name,
-        origen: "Archivo Subido",
-        superficieHa: areaCalculada,
-        geojson: featureCollection,
-        puntosCoords: coordsLeaflet,
-        escenas: [],
-        escenaSeleccionada: null,
-        leyendaClusters: [],
-        tileUrl: null
+      const bruto = file.name.toLowerCase().endsWith('.zip') ? await shp(await file.arrayBuffer()) : JSON.parse(await file.text());
+      const fcBruta = Array.isArray(bruto) ? bruto[0] : bruto;
+      const feats = fcBruta.type === 'FeatureCollection' ? fcBruta.features : [fcBruta.type === 'Feature' ? fcBruta : { type: 'Feature', geometry: fcBruta }];
+      // solo polígonos, sin atributos ni coordenada Z (más liviano y compatible con Earth Engine)
+      const featureCollection = {
+        type: 'FeatureCollection',
+        features: feats
+          .filter(f => f?.geometry && ['Polygon', 'MultiPolygon'].includes(f.geometry.type))
+          .map(f => ({ type: 'Feature', properties: {}, geometry: { type: f.geometry.type, coordinates: quitarZ(f.geometry.coordinates) } }))
       };
-
-      setLotes(prev => [...prev, nuevoLote]);
-      setLoteActivoId(nuevoLote.id);
-      setUrlCapaIndice(null);
-      if (coordsLeaflet.length > 0) setCentroMapa(coordsLeaflet[0]);
+      const contornos = extraerContornos(featureCollection);
+      if (contornos.length === 0) throw new Error('sin polígonos');
+      const nuevo = agregarLote({ nombre: file.name, origen: "Archivo Subido", geojson: featureCollection, contornos });
+      setCentroMapa({ coords: nuevo.puntosCoords, t: Date.now() });
     } catch (err) {
-      alert("Error al cargar archivo vectorial.");
+      avisar('El archivo no tiene polígonos válidos. Usa .geojson, .json o un .zip con shapefile.');
     }
   };
 
   const finalizarDibujoLote = () => {
-    if (puntosPoligono.length < 3) {
-      alert("Debes marcar al menos 3 puntos en el mapa.");
-      return;
-    }
-    const coordsGeoJSON = [...puntosPoligono, puntosPoligono[0]].map(p => [p[1], p[0]]);
+    if (puntosPoligono.length < 3) { avisar('Marca al menos 3 puntos en el mapa.', 'info'); return; }
+    const anillo = [...puntosPoligono, puntosPoligono[0]].map(p => [p[1], p[0]]);
     const featureCollection = {
       type: "FeatureCollection",
-      features: [{
-        type: "Feature",
-        geometry: { type: "Polygon", coordinates: [coordsGeoJSON] },
-        properties: {}
-      }]
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [anillo] }, properties: {} }]
     };
-    const area = calcularAreaGeoJSONHa(featureCollection);
-    const nuevoLote = {
-      id: `lote_${Date.now()}`,
-      nombre: `Lote ${lotes.length + 1}`,
-      origen: "Dibujado",
-      superficieHa: area,
-      geojson: featureCollection,
-      puntosCoords: puntosPoligono,
-      escenas: [],
-      escenaSeleccionada: null,
-      leyendaClusters: [],
-      tileUrl: null
-    };
-    setLotes(prev => [...prev, nuevoLote]);
-    setLoteActivoId(nuevoLote.id);
+    agregarLote({ nombre: `Lote ${lotes.length + 1}`, origen: "Dibujado", geojson: featureCollection, contornos: [puntosPoligono] });
     setPuntosPoligono([]);
     setModoDibujar(false);
   };
@@ -595,6 +766,13 @@ export default function App() {
     <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', height: '100vh', width: '100vw', backgroundColor: COLOR.bg, overflow: 'hidden', fontFamily: "'Inter', 'Roboto', system-ui, -apple-system, sans-serif", fontSize: '12px', lineHeight: '1.4', letterSpacing: '-0.01em' }}>
 
       <input type="file" ref={fileInputRef} onChange={manejarCargaArchivo} accept=".zip,.geojson,.json" style={{ display: 'none' }} />
+
+      {toast && (
+        <div role="status" style={{ position: 'fixed', top: '14px', left: '50%', transform: 'translateX(-50%)', zIndex: 4000, maxWidth: '520px', backgroundColor: COLOR.panel, border: `1px solid ${toast.tipo === 'error' ? '#dc2626' : COLOR.accent}`, color: COLOR.text, padding: '8px 12px', borderRadius: COLOR.radius, fontSize: '12px', boxShadow: '0 8px 24px rgba(0,0,0,0.6)', display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <span>{toast.texto}</span>
+          <button onClick={() => setToast(null)} aria-label="Cerrar aviso" style={{ background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer' }}>✕</button>
+        </div>
+      )}
 
       {/* 1. DOCK DESPLEGABLE CON ÍCONOS MONOCROMÁTICOS */}
       <div
@@ -622,7 +800,7 @@ export default function App() {
 
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '2px', padding: '8px 4px' }}>
           <div
-            onClick={() => setSeccionActiva('imagenes')}
+            onClick={() => irASeccion('imagenes')}
             style={{
               display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 12px', borderRadius: COLOR.radius,
               backgroundColor: seccionActiva === 'imagenes' ? COLOR.cardActiveBg : 'transparent',
@@ -634,7 +812,7 @@ export default function App() {
           </div>
 
           <div
-            onClick={() => setSeccionActiva('ambientacion')}
+            onClick={() => irASeccion('ambientacion')}
             style={{
               display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 12px', borderRadius: COLOR.radius,
               backgroundColor: seccionActiva === 'ambientacion' ? COLOR.cardActiveBg : 'transparent',
@@ -645,7 +823,14 @@ export default function App() {
             {dockExpanded && <span style={{ fontSize: '12px', fontWeight: '400' }}>Zonas de vegetación</span>}
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 12px', color: COLOR.textFaint, cursor: 'not-allowed' }}>
+          <div
+            onClick={() => irASeccion('tendencia')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 12px', borderRadius: COLOR.radius,
+              backgroundColor: seccionActiva === 'tendencia' ? COLOR.cardActiveBg : 'transparent',
+              color: seccionActiva === 'tendencia' ? '#ffffff' : COLOR.textDim, cursor: 'pointer'
+            }}
+          >
             <IconTendencia />
             {dockExpanded && <span style={{ fontSize: '12px' }}>Tendencia vegetal</span>}
           </div>
@@ -710,7 +895,7 @@ export default function App() {
                   width: '100%', backgroundColor: COLOR.panel, border: `1px solid ${COLOR.border}`,
                   color: COLOR.text, padding: '6px 10px', borderRadius: COLOR.radius,
                   fontSize: '11px', fontWeight: '500', display: 'flex', alignItems: 'center',
-                  justify: 'space-between', cursor: 'pointer'
+                  justifyContent: 'space-between', cursor: 'pointer'
                 }}
               >
                 <span>Filtros de búsqueda</span>
@@ -731,7 +916,7 @@ export default function App() {
 
                   <div>
                     <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '3px' }}>Nubosidad Máxima: {nubosidadMax}%</label>
-                    <input type="range" min="0" max="100" value={nubosidadMax} onChange={(e) => setNubosidadMax(e.target.value)} style={{ width: '100%', accentColor: COLOR.accent }} />
+                    <input type="range" min="0" max="100" value={nubosidadMax} onChange={(e) => setNubosidadMax(Number(e.target.value))} style={{ width: '100%', accentColor: COLOR.accent }} />
                   </div>
 
                   <div style={{ marginTop: '2px' }}>
@@ -751,6 +936,11 @@ export default function App() {
                     </div>
                   </div>
 
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '10px', color: COLOR.textDim }}>
+                    <input type="checkbox" checked={enmascararNubes} onChange={(e) => setEnmascararNubes(e.target.checked)} style={{ accentColor: COLOR.accent }} />
+                    <span>Enmascarar nubes y sombras en índices</span>
+                  </label>
+
                   <button
                     onClick={buscarEscenas}
                     disabled={cargando}
@@ -764,6 +954,16 @@ export default function App() {
 
             {/* LISTADO DE RESULTADOS DE ESCENAS Y OPCIONES DE DESCARGA */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {!loteActual && (
+                <div style={{ fontSize: '11px', color: COLOR.textDim, padding: '6px' }}>
+                  Dibuja un lote con la herramienta de lápiz o sube un archivo (.geojson o .zip con shapefile) para buscar imágenes.
+                </div>
+              )}
+              {loteActual && loteActual.buscada && loteActual.escenas.length === 0 && (
+                <div style={{ fontSize: '11px', color: COLOR.textDim, padding: '6px' }}>
+                  No hay escenas con estos filtros. Amplía las fechas o sube la nubosidad máxima.
+                </div>
+              )}
               {loteActual && loteActual.escenas.map((e) => {
                 const estaSeleccionada = loteActual.escenaSeleccionada?.id === e.id;
                 return (
@@ -795,11 +995,11 @@ export default function App() {
                     </button>
 
                     <div style={{ display: 'flex', gap: '10px' }}>
-                      <img src={e.thumb} alt="thumb" style={{ width: '64px', height: '64px', objectFit: 'cover', borderRadius: '2px' }} />
+                      <img src={e.thumb || placeholderSvg("sin miniatura")} alt="miniatura" style={{ width: '64px', height: '64px', objectFit: 'cover', borderRadius: '2px' }} />
                       <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '2px', paddingRight: '20px' }}>
                         <span style={{ color: COLOR.text, fontSize: '12px', fontWeight: '600' }}>{e.fecha}</span>
                         <span style={{ color: COLOR.textDim, fontSize: '11px' }}>Nubosidad: {e.nubosidad}%</span>
-                        <span style={{ color: COLOR.textDim, fontSize: '11px' }}>{e.satelite}</span>
+                        <span style={{ color: COLOR.textDim, fontSize: '11px' }}>{e.satelite}{e.tile ? ` · ${e.tile}` : ''}</span>
                       </div>
                     </div>
 
@@ -835,7 +1035,7 @@ export default function App() {
         )}
 
         {seccionActiva === 'ambientacion' && (
-          <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px', overflowY: 'auto' }}>
             <div style={{ fontSize: '12px', fontWeight: '600', color: COLOR.text, textTransform: 'uppercase', borderBottom: `1px solid ${COLOR.borderSoft}`, paddingBottom: '6px', letterSpacing: '0.04em' }}>
               ZONAS DE VEGETACIÓN (AMBIENTACIÓN)
             </div>
@@ -856,6 +1056,18 @@ export default function App() {
                   <option value="NDWI">NDWI</option>
                   <option value="SAVI">SAVI</option>
                   <option value="NBR">NBR</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '3px' }}>Método de corte:</label>
+                <select
+                  value={metodoZonas}
+                  onChange={(e) => setMetodoZonas(e.target.value)}
+                  style={{ width: '100%', backgroundColor: COLOR.panel, border: `1px solid ${COLOR.border}`, color: COLOR.text, padding: '5px 8px', borderRadius: COLOR.radius, fontSize: '11px', outline: 'none' }}
+                >
+                  <option value="cuantiles">Cuantiles (zonas de igual superficie)</option>
+                  <option value="intervalos">Intervalos iguales (superficies reales)</option>
                 </select>
               </div>
 
@@ -904,6 +1116,48 @@ export default function App() {
             </div>
           </div>
         )}
+        {seccionActiva === 'tendencia' && (
+          <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px', overflowY: 'auto' }}>
+            <div style={{ fontSize: '12px', fontWeight: '600', color: COLOR.text, textTransform: 'uppercase', borderBottom: `1px solid ${COLOR.borderSoft}`, paddingBottom: '6px', letterSpacing: '0.04em' }}>
+              TENDENCIA VEGETAL
+            </div>
+            <div>
+              <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '3px' }}>Índice:</label>
+              <select
+                value={indiceTendencia}
+                onChange={(e) => {
+                  setIndiceTendencia(e.target.value);
+                  if (puntoTendencia) cargarSerie(puntoTendencia[0], puntoTendencia[1], e.target.value);
+                }}
+                style={{ width: '100%', backgroundColor: COLOR.panel, border: `1px solid ${COLOR.border}`, color: COLOR.text, padding: '5px 8px', borderRadius: COLOR.radius, fontSize: '11px', outline: 'none' }}
+              >
+                <option value="NDVI">NDVI</option>
+                <option value="NDWI">NDWI</option>
+                <option value="SAVI">SAVI</option>
+                <option value="NBR">NBR</option>
+              </select>
+            </div>
+            <div style={{ fontSize: '11px', color: COLOR.textDim }}>
+              {puntoTendencia
+                ? `Punto: ${puntoTendencia[0].toFixed(5)}, ${puntoTendencia[1].toFixed(5)}`
+                : 'Haz clic en el mapa para ver cómo cambió el índice en ese punto. Usa las fechas y sensores de "Imágenes abiertas".'}
+            </div>
+            <div style={{ fontSize: '11px', color: COLOR.textDim }}>Período: {fechaInicio} a {fechaFin}</div>
+            {cargandoSerie && <div style={{ fontSize: '11px', color: COLOR.textDim }}>Consultando pasadas del satélite…</div>}
+            {serieTendencia && (
+              <>
+                <GraficoSerie puntos={serieTendencia} indice={indiceTendencia} />
+                {serieTendencia.length > 0 && (
+                  <div style={{ display: 'flex', gap: '12px', fontSize: '10px', color: COLOR.textDim }}>
+                    <span><span style={{ color: COLOR.accent }}>●</span> Sentinel-2</span>
+                    <span><span style={{ color: '#f59e0b' }}>●</span> Landsat</span>
+                    <span>{serieTendencia.length} observaciones</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </aside>
 
       {/* 3. VISUALIZADOR DE MAPA Y CAPAS */}
@@ -912,9 +1166,10 @@ export default function App() {
         {/* BUSCADOR */}
         <div style={{ position: 'absolute', top: '12px', left: '16px', zIndex: 1000, backgroundColor: COLOR.panel, borderRadius: COLOR.radius, border: `1px solid ${COLOR.border}`, display: 'flex', alignItems: 'center', boxShadow: '0 4px 12px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
           <input
-            type="text" placeholder="Ubicación o coordenadas..." value={inputBusqueda} onChange={(e) => setInputBusqueda(e.target.value)}
+            type="text" placeholder="Ubicación o coordenadas..." value={inputBusqueda} onChange={(e) => setInputBusqueda(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && buscarUbicacion()}
             style={{ background: 'transparent', border: 'none', color: COLOR.text, fontSize: '11px', width: '220px', outline: 'none', padding: '6px 10px' }}
           />
+          <button onClick={buscarUbicacion} style={{ backgroundColor: COLOR.panelAlt, color: COLOR.text, border: 'none', padding: '6px 10px', fontSize: '11px', cursor: 'pointer', borderLeft: `1px solid ${COLOR.border}` }}>Ir</button>
           <button onClick={() => fileInputRef.current?.click()} style={{ backgroundColor: COLOR.accent, color: '#fff', border: 'none', padding: '6px 12px', fontSize: '11px', fontWeight: '500', cursor: 'pointer', borderLeft: `1px solid ${COLOR.border}` }}>
             Subir área
           </button>
@@ -937,11 +1192,11 @@ export default function App() {
         )}
 
         {/* ZONAS DE MANEJO RESULTADOS */}
-        {mostrarPanelResultadosZonas && loteActual && loteActual.leyendaClusters && (
-          <div style={{ position: 'absolute', top: '70px', right: '16px', width: '190px', zIndex: 1000, backgroundColor: 'rgba(18, 23, 32, 0.96)', border: `1px solid ${COLOR.border}`, borderRadius: COLOR.radius, padding: '10px', boxShadow: '0 8px 32px rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {mostrarPanelResultadosZonas && ambientacion && (
+          <div style={{ position: 'absolute', top: '70px', right: '60px', width: '230px', zIndex: 1000, backgroundColor: 'rgba(18, 23, 32, 0.96)', border: `1px solid ${COLOR.border}`, borderRadius: COLOR.radius, padding: '10px', boxShadow: '0 8px 32px rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${COLOR.borderSoft}`, paddingBottom: '4px' }}>
-              <span style={{ fontSize: '11px', fontWeight: '600', color: COLOR.text }}>Zonas de Manejo</span>
-              <button onClick={() => setMostrarPanelResultadosZonas(false)} style={{ background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer' }}>✕</button>
+              <span style={{ fontSize: '11px', fontWeight: '600', color: COLOR.text }}>Zonas de Manejo · {ambientacion.indice}</span>
+              <button onClick={() => setMostrarPanelResultadosZonas(false)} aria-label="Cerrar" style={{ background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer' }}>✕</button>
             </div>
 
             <div style={{ display: 'flex', border: `1px solid ${COLOR.border}`, borderRadius: COLOR.radius, overflow: 'hidden', alignSelf: 'center' }}>
@@ -951,16 +1206,32 @@ export default function App() {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              {loteActual.leyendaClusters.map((z) => (
+              {ambientacion.zonas.map((z) => (
                 <div key={z.zona} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLOR.panelAlt, border: `1px solid ${COLOR.borderSoft}`, padding: '5px 8px', borderRadius: COLOR.radius }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <div style={{ width: '10px', height: '10px', borderRadius: '2px', backgroundColor: z.color }} />
-                    <span style={{ fontSize: '11px', color: COLOR.text }}>{z.etiqueta}</span>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <span style={{ fontSize: '11px', color: COLOR.text }}>{z.etiqueta}</span>
+                      <span style={{ fontSize: '9px', color: COLOR.textFaint }}>{z.rango}</span>
+                    </div>
                   </div>
                   <span style={{ fontSize: '11px', color: COLOR.green, fontWeight: '600' }}>
                     {unidadMetrica === 'm' ? `${z.m2} m²` : unidadMetrica === 'ha' ? `${z.ha} ha` : `${z.porcentaje}%`}
                   </span>
                 </div>
+              ))}
+            </div>
+
+            <div style={{ fontSize: '10px', color: COLOR.textDim }}>
+              Lote: {ambientacion.areaTotalHa} ha
+              {ambientacion.areaSinDatoHa > 0 && ` · ${ambientacion.areaSinDatoHa} ha sin dato (nubes/sombra)`}
+            </div>
+
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {[['geojson', 'GeoJSON'], ['shp', 'SHP'], ['gpkg', 'GPKG']].map(([fmt, etiqueta]) => (
+                <button key={fmt} disabled={descargandoRaster} onClick={() => descargarVectorZonas(fmt)} style={{ flex: 1, backgroundColor: COLOR.panel, border: `1px solid ${COLOR.border}`, color: COLOR.text, borderRadius: COLOR.radius, padding: '4px', fontSize: '10px', fontWeight: '600', cursor: 'pointer' }}>
+                  {etiqueta}
+                </button>
               ))}
             </div>
           </div>
@@ -973,11 +1244,7 @@ export default function App() {
           <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: COLOR.panel, borderRadius: COLOR.radius, border: `1px solid ${COLOR.border}`, overflow: 'hidden', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }}>
             <button
               title="Dibujar polígono de lote"
-              onClick={() => {
-                setModoDibujar(!modoDibujar);
-                setModoIdentificar(false);
-                setModoMedir(false);
-              }}
+              onClick={() => activarHerramienta('dibujar')}
               style={{ width: '32px', height: '32px', backgroundColor: modoDibujar ? COLOR.cardActiveBg : 'transparent', border: 'none', color: modoDibujar ? COLOR.accent : COLOR.textDim, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
             >
               <IconDibujar />
@@ -987,11 +1254,7 @@ export default function App() {
 
             <button
               title="Ver valor e información de píxel"
-              onClick={() => {
-                setModoIdentificar(!modoIdentificar);
-                setModoDibujar(false);
-                setModoMedir(false);
-              }}
+              onClick={() => activarHerramienta('identificar')}
               style={{ width: '32px', height: '32px', backgroundColor: modoIdentificar ? COLOR.cardActiveBg : 'transparent', border: 'none', color: modoIdentificar ? COLOR.accent : COLOR.textDim, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
             >
               <IconInfoPixel />
@@ -1001,11 +1264,7 @@ export default function App() {
 
             <button
               title="Medir distancia"
-              onClick={() => {
-                setModoMedir(!modoMedir);
-                setModoDibujar(false);
-                setModoIdentificar(false);
-              }}
+              onClick={() => activarHerramienta('medir')}
               style={{ width: '32px', height: '32px', backgroundColor: modoMedir ? COLOR.cardActiveBg : 'transparent', border: 'none', color: modoMedir ? COLOR.accent : COLOR.textDim, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
             >
               <IconRegla />
@@ -1051,13 +1310,22 @@ export default function App() {
               Finalizar Lote ({puntosPoligono.length} pts)
             </button>
           )}
+
+          {modoDibujar && puntosPoligono.length > 0 && (
+            <button
+              onClick={() => setPuntosPoligono(prev => prev.slice(0, -1))}
+              style={{ backgroundColor: COLOR.panel, color: COLOR.text, border: `1px solid ${COLOR.border}`, padding: '6px 10px', borderRadius: COLOR.radius, fontSize: '11px', cursor: 'pointer' }}
+            >
+              Deshacer punto
+            </button>
+          )}
         </div>
 
         {/* MAPA PRINCIPAL LEAFLET */}
         <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 }}>
           <MapContainer ref={mapInstanceRef} center={[-28.42, -65.77]} zoom={11} style={{ height: '100%', width: '100%', background: '#0c0f14' }} zoomControl={false}>
-            <ControllerCentradoMapa centro={centroMapa} />
-            <ManejadorEventosMapa modoIdentificar={modoIdentificar} modoMedir={modoMedir} modoDibujar={modoDibujar} escenaSeleccionada={loteActual?.escenaSeleccionada} modoViz={modoViz} setDatosPixel={setDatosPixel} setCargandoPixel={setCargandoPixel} setPuntosMedicion={setPuntosMedicion} setPuntosPoligono={setPuntosPoligono} setCentroMapa={setCentroMapa} setPosicionPixelInfo={setPosicionPixelInfo} />
+            <ControllerCentradoMapa destino={centroMapa} />
+            <ManejadorEventosMapa onClick={manejarClickMapa} />
 
             <TileLayer url={MAPAS_BASE[mapaBaseActual]} />
             {urlCapaIndice && <TileLayer url={urlCapaIndice} key={urlCapaIndice} />}
@@ -1075,11 +1343,39 @@ export default function App() {
             {puntosMedicion.length > 0 && <Polyline positions={puntosMedicion} pathOptions={{ color: '#f59e0b', weight: 2 }} />}
             {puntosMedicion.map((pt, idx) => <CircleMarker key={`med_${idx}`} center={pt} radius={4} pathOptions={{ color: '#f59e0b', fillColor: '#ffffff', fillOpacity: 1 }} />)}
 
-            {loteActual && loteActual.puntosCoords && loteActual.puntosCoords.length > 0 && (
-              <Polygon positions={loteActual.puntosCoords} pathOptions={{ color: '#ffffff', weight: 1.5, fillColor: 'transparent' }} />
+            {loteActual && (loteActual.contornos || []).map((c, i) => (
+              <Polygon key={`${loteActual.id}_${i}`} positions={c} pathOptions={{ color: '#ffffff', weight: 1.5, fillColor: 'transparent' }} />
+            ))}
+
+            {posicionPixelInfo && (
+              <Popup key={posicionPixelInfo.join(',')} position={posicionPixelInfo}>
+                <div style={{ fontSize: '11px', color: '#111', minWidth: '130px' }}>
+                  <div style={{ fontWeight: 600, marginBottom: '2px' }}>{modoViz}</div>
+                  {cargandoPixel && <div>Leyendo…</div>}
+                  {datosPixel?.error && <div>{datosPixel.error}</div>}
+                  {datosPixel && !datosPixel.error && (
+                    Object.keys(datosPixel.valores || {}).length > 0
+                      ? Object.entries(datosPixel.valores).map(([k, v]) => <div key={k}>{k}: {v}</div>)
+                      : <div>Sin dato (nube o sombra)</div>
+                  )}
+                  <div style={{ color: '#666', marginTop: '3px' }}>{posicionPixelInfo[0].toFixed(5)}, {posicionPixelInfo[1].toFixed(5)}</div>
+                </div>
+              </Popup>
             )}
+
+            {puntoTendencia && <CircleMarker center={puntoTendencia} radius={6} pathOptions={{ color: '#ffffff', fillColor: COLOR.green, fillOpacity: 1 }} />}
           </MapContainer>
         </div>
+
+        {urlCapaIndice && <LeyendaIndice titulo={modoViz} vis={visActual} bottom={panelDesplegado ? '150px' : '30px'} />}
+
+        {puntosMedicion.length > 0 && (
+          <div style={{ position: 'absolute', top: '52px', left: '16px', zIndex: 1000, backgroundColor: COLOR.panel, border: `1px solid ${COLOR.border}`, borderRadius: COLOR.radius, padding: '5px 8px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: COLOR.text, boxShadow: '0 4px 12px rgba(0,0,0,0.45)' }}>
+            <span>Distancia: <b>{formatoDistancia(distanciaTotalM(puntosMedicion))}</b></span>
+            <button onClick={() => setPuntosMedicion(prev => prev.slice(0, -1))} style={{ background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer', fontSize: '10px' }}>Deshacer</button>
+            <button onClick={() => setPuntosMedicion([])} style={{ background: 'transparent', border: 'none', color: COLOR.accent, cursor: 'pointer', fontSize: '10px' }}>Limpiar</button>
+          </div>
+        )}
 
         {/* CARRUSEL INFERIOR DE ÍNDICES */}
         <div style={{ position: 'absolute', bottom: panelDesplegado ? 0 : '-110px', left: 0, right: 0, height: '135px', backgroundColor: COLOR.panelAlt, borderTop: `1px solid ${COLOR.border}`, display: 'flex', flexDirection: 'column', zIndex: 1000, transition: 'bottom 0.25s ease' }}>
@@ -1100,9 +1396,9 @@ export default function App() {
               .map((capa) => {
                 const activa = modoViz === capa.id;
                 return (
-                  <div key={capa.id} onClick={() => loteActual && loteActual.escenaSeleccionada && seleccionarEscena(loteActual.escenaSeleccionada, capa.id)} style={{ width: '100px', height: '80px', borderRadius: COLOR.radius, overflow: 'hidden', border: `2px solid ${activa ? COLOR.accent : COLOR.borderSoft}`, backgroundColor: COLOR.panel, flexShrink: 0, cursor: 'pointer', display: 'flex', flexDirection: 'column' }}>
+                  <div key={capa.id} onClick={() => (loteActual?.escenaSeleccionada ? seleccionarEscena(loteActual.escenaSeleccionada, capa.id) : avisar('Selecciona una escena en "Imágenes abiertas" para aplicar una capa.', 'info'))} style={{ width: '100px', height: '80px', borderRadius: COLOR.radius, overflow: 'hidden', border: `2px solid ${activa ? COLOR.accent : COLOR.borderSoft}`, backgroundColor: COLOR.panel, flexShrink: 0, cursor: 'pointer', display: 'flex', flexDirection: 'column' }}>
                     <div style={{ flex: 1, backgroundColor: '#000' }}>
-                      <img src={capa.thumbLocal} alt={capa.nombre} onError={(e) => { e.target.src = 'https://via.placeholder.com/100x70/11151c/ffffff?text=' + capa.nombre; }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <img src={capa.thumbLocal} alt={capa.nombre} onError={(e) => { e.target.onerror = null; e.target.src = placeholderSvg(capa.nombre); }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     </div>
                     <div style={{ backgroundColor: activa ? COLOR.cardActiveBg : COLOR.panel, padding: '3px', color: COLOR.text, fontSize: '10px', textAlign: 'center', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {capa.nombre}
@@ -1133,7 +1429,7 @@ export default function App() {
             </div>
 
             <div style={{ display: 'flex', gap: '12px', backgroundColor: COLOR.panelAlt, padding: '10px', borderRadius: COLOR.radius, border: `1px solid ${COLOR.borderSoft}` }}>
-              <img src={escenaModal.thumb} alt="thumb" style={{ width: '60px', height: '60px', objectFit: 'cover', borderRadius: '2px' }} />
+              <img src={escenaModal.thumb || placeholderSvg("sin miniatura")} alt="miniatura" style={{ width: '60px', height: '60px', objectFit: 'cover', borderRadius: '2px' }} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                 <span style={{ fontWeight: '600', color: COLOR.text }}>Fecha: {escenaModal.fecha}</span>
                 <span style={{ color: COLOR.textDim }}>Satélite: {escenaModal.satelite}</span>
