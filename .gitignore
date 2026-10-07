@@ -1,15 +1,38 @@
-# Dependencias y entornos
-node_modules/
-.venv/
+# === ENTORNO DE PYTHON Y VIRTUALENV ===
+backend/venv/
 venv/
+ENV/
+env/
 __pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
 
-# Archivos de construcción y temporales
-dist/
-build/
-descargas_temp/
+# === DESCARGAS Y DATOS PESADOS (RASTER / IMÁGENES SATELITALES) ===
+backend/descargas/
 *.zip
+*.zip.part
 *.tif
+*.tiff
+*.jp2
+*.geotiff
+*.nc
+*.hdf
 
-# Claves locales
+# === DEPENDENCIAS DE FRONTEND (NODE) ===
+frontend/node_modules/
+.npm
+build/
+dist/
+
+# === VARIABLES DE ENTORNO Y CLAVES ===
 .env
+.env.local
+.env.development.local
+.env.production.local
+
+# === ARCHIVOS DE CONFIGURACIÓN DE EDITOR/SISTEMA ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
