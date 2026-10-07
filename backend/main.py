@@ -43,6 +43,10 @@ app.add_middleware(
     expose_headers=["Content-Disposition", "X-Escala-Usada"],
 )
 
+from descargas import router as descargas_router  # noqa: E402
+
+app.include_router(descargas_router)
+
 executor = ThreadPoolExecutor(max_workers=10)
 executor_thumbs = ThreadPoolExecutor(max_workers=8)  # separado para no bloquear al principal
 
@@ -306,13 +310,15 @@ def _feature_a_escena(f: dict, landsat: bool) -> dict:
         satelite = "Landsat " + str(p.get("SPACECRAFT_ID", "")).replace("LANDSAT_", "")
         nubosidad = p.get("CLOUD_COVER", 0)
         tile = f"{p.get('WRS_PATH')}/{p.get('WRS_ROW')}"
+        producto = p.get("LANDSAT_PRODUCT_ID")
     else:
         satelite = p.get("SPACECRAFT_NAME", "Sentinel-2")
         nubosidad = p.get("CLOUDY_PIXEL_PERCENTAGE", 0)
         tile = p.get("MGRS_TILE")
+        producto = p.get("PRODUCT_ID")
     return {
         "id": f["id"], "fecha": fecha, "nubosidad": round(nubosidad or 0, 1),
-        "satelite": satelite, "tile": tile, "_ms": ms,
+        "satelite": satelite, "tile": tile, "producto": producto, "_ms": ms,
     }
 
 

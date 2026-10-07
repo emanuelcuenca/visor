@@ -471,8 +471,11 @@ export default function App() {
 
   const [modalDescargaAbierto, setModalDescargaAbierto] = useState(false);
   const [escenaModal, setEscenaModal] = useState(null);
-  const [bandasSeleccionadas, setBandasSeleccionadas] = useState([]);
+  const [trabajo, setTrabajo] = useState(null);
+  const pollRef = useRef(null);
   const [infoHover, setInfoHover] = useState(null);
+
+  useEffect(() => () => clearInterval(pollRef.current), []);
 
   const loteActual = lotes.find(l => l.id === loteActivoId) || null;
   const urlCapaIndice = loteActual?.tileUrl || null;
@@ -657,18 +660,15 @@ export default function App() {
 
   const abrirModalDescargaEscena = (escenaObj, e) => {
     e.stopPropagation();
+    clearInterval(pollRef.current);
+    setTrabajo(null);
     setEscenaModal(escenaObj);
-    setBandasSeleccionadas(BANDAS_DISPONIBLES[familiaDe(escenaObj)].map(b => b.id));
     setModalDescargaAbierto(true);
   };
 
-  const toggleBandaModal = (bandaId) => {
-    setBandasSeleccionadas(prev => prev.includes(bandaId) ? prev.filter(b => b !== bandaId) : [...prev, bandaId]);
-  };
-
-  const toggleTodasBandasModal = (todas) => {
-    if (!escenaModal) return;
-    setBandasSeleccionadas(todas ? BANDAS_DISPONIBLES[familiaDe(escenaModal)].map(b => b.id) : []);
+  const cerrarModalDescarga = () => {
+    clearInterval(pollRef.current);
+    setModalDescargaAbierto(false);
   };
 
   const avisarEscala = (response) => {
@@ -676,21 +676,34 @@ export default function App() {
     if (escala) avisar(`Descarga lista. Para respetar el límite de tamaño se usó un píxel de ${escala} m.`, 'info');
   };
 
-  const ejecutarDescargaEscenaBandas = async () => {
-    if (!escenaModal || !loteActual) return;
-    if (bandasSeleccionadas.length === 0) { avisar('Selecciona al menos una banda.', 'info'); return; }
-    setDescargandoRaster(true);
+  // Descarga de la escena completa (producto original de Copernicus), preparada en segundo plano
+  const iniciarDescargaEscena = async () => {
+    if (!escenaModal) return;
+    if (!escenaModal.producto) {
+      avisar('Esta escena no trae el identificador del producto. Vuelve a buscar las escenas.', 'info');
+      return;
+    }
+    clearInterval(pollRef.current);
+    setTrabajo({ estado: 'en_cola', progreso: 0 });
     try {
-      const response = await axios.post(`${API_BASE_URL}/descargar-escena-bandas`, {
-        escena_id: escenaModal.id, bandas: bandasSeleccionadas, geojson: loteActual.geojson
-      }, { responseType: 'blob' });
-      guardarBlob(response.data, `${loteActual.nombre}_${escenaModal.satelite}_${escenaModal.fecha}_bandas.zip`);
-      avisarEscala(response);
-      setModalDescargaAbierto(false);
+      const { data } = await axios.post(`${API_BASE_URL}/descargas`, {
+        producto: escenaModal.producto,
+        satelite: escenaModal.satelite
+      });
+      const id = data.job_id;
+      setTrabajo({ ...data, id });
+      pollRef.current = setInterval(async () => {
+        try {
+          const r = await axios.get(`${API_BASE_URL}/descargas/${id}`);
+          setTrabajo({ ...r.data, id });
+          if (r.data.estado === 'listo' || r.data.estado === 'error') clearInterval(pollRef.current);
+        } catch (err) {
+          clearInterval(pollRef.current);
+          setTrabajo({ estado: 'error', error: await mensajeError(err, 'Se perdió la conexión con el servidor') });
+        }
+      }, 2000);
     } catch (err) {
-      avisar(await mensajeError(err, 'Error al descargar las bandas'));
-    } finally {
-      setDescargandoRaster(false);
+      setTrabajo({ estado: 'error', error: await mensajeError(err, 'No se pudo iniciar la descarga') });
     }
   };
 
@@ -1636,7 +1649,7 @@ export default function App() {
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${COLOR.borderSoft}`, paddingBottom: '8px' }}>
               <span style={{ fontSize: '13px', fontWeight: '600' }}>Descarga de Escena Satelital Completa</span>
-              <button onClick={() => setModalDescargaAbierto(false)} style={{ background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer', fontSize: '14px' }}>✕</button>
+              <button onClick={cerrarModalDescarga} style={{ background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer', fontSize: '14px' }}>✕</button>
             </div>
 
             <div style={{ display: 'flex', gap: '12px', backgroundColor: COLOR.panelAlt, padding: '10px', borderRadius: COLOR.radius, border: `1px solid ${COLOR.borderSoft}` }}>
@@ -1649,44 +1662,51 @@ export default function App() {
               </div>
             </div>
 
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span style={{ fontSize: '11px', fontWeight: '600', color: COLOR.textDim }}>SELECCIONAR BANDAS DE INTERÉS:</span>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button onClick={() => toggleTodasBandasModal(true)} style={{ background: 'transparent', border: 'none', color: COLOR.accent, fontSize: '10px', cursor: 'pointer' }}>Todas</button>
-                  <button onClick={() => toggleTodasBandasModal(false)} style={{ background: 'transparent', border: 'none', color: COLOR.textDim, fontSize: '10px', cursor: 'pointer' }}>Ninguna</button>
-                </div>
-              </div>
-
-              <div style={{ maxHeight: '180px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', paddingRight: '4px' }}>
-                {BANDAS_DISPONIBLES[familiaDe(escenaModal)].map((b) => (
-                  <label key={b.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLOR.panelAlt, border: `1px solid ${COLOR.borderSoft}`, padding: '6px 10px', borderRadius: COLOR.radius, cursor: 'pointer' }}>
-                    <span style={{ fontSize: '11px', color: COLOR.text }}>{b.nombre}</span>
-                    <input
-                      type="checkbox"
-                      checked={bandasSeleccionadas.includes(b.id)}
-                      onChange={() => toggleBandaModal(b.id)}
-                      style={{ accentColor: COLOR.accent }}
-                    />
-                  </label>
-                ))}
-              </div>
+            <div style={{ fontSize: '11px', color: COLOR.textDim, lineHeight: '1.5' }}>
+              Se descarga el producto original completo de Copernicus (todas las bandas a su resolución nativa, sin recortar).
+              Es un archivo grande (cerca de 1 GB): primero se prepara en el servidor y después aparece el botón para guardarlo.
             </div>
+
+            {trabajo && (
+              <div style={{ backgroundColor: COLOR.panelAlt, border: `1px solid ${COLOR.borderSoft}`, borderRadius: COLOR.radius, padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ fontSize: '11px', color: trabajo.estado === 'error' ? '#f87171' : COLOR.text }}>
+                  {trabajo.estado === 'en_cola' && 'En cola…'}
+                  {trabajo.estado === 'buscando' && 'Buscando la escena en Copernicus…'}
+                  {trabajo.estado === 'descargando' && `Descargando en el servidor… ${trabajo.mb} MB${trabajo.mb_total ? ` de ${trabajo.mb_total} MB` : ''}`}
+                  {trabajo.estado === 'listo' && `Lista para guardar (${trabajo.mb_total || trabajo.mb} MB).`}
+                  {trabajo.estado === 'error' && (trabajo.error || 'Ocurrió un error.')}
+                </div>
+                {(trabajo.estado === 'descargando' || trabajo.estado === 'listo') && (
+                  <div style={{ height: '4px', backgroundColor: COLOR.border, borderRadius: '2px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${trabajo.progreso || 0}%`, backgroundColor: trabajo.estado === 'listo' ? COLOR.green : COLOR.accent, transition: 'width 0.4s ease' }} />
+                  </div>
+                )}
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '4px' }}>
               <button
-                onClick={() => setModalDescargaAbierto(false)}
+                onClick={cerrarModalDescarga}
                 style={{ backgroundColor: COLOR.panelAlt, border: `1px solid ${COLOR.border}`, color: COLOR.textDim, padding: '7px 12px', borderRadius: COLOR.radius, cursor: 'pointer', fontSize: '11px' }}
               >
-                Cancelar
+                Cerrar
               </button>
-              <button
-                disabled={descargandoRaster}
-                onClick={ejecutarDescargaEscenaBandas}
-                style={{ backgroundColor: COLOR.accent, color: '#fff', border: 'none', padding: '7px 14px', borderRadius: COLOR.radius, fontWeight: '600', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
-              >
-                <IconDescargas /> {descargandoRaster ? 'Procesando Descarga...' : 'Descargar GeoTIFF Multibanda'}
-              </button>
+              {trabajo?.estado === 'listo' ? (
+                <a
+                  href={`${API_BASE_URL}/descargas/${trabajo.id}/archivo`}
+                  style={{ backgroundColor: COLOR.green, color: '#fff', textDecoration: 'none', padding: '7px 14px', borderRadius: COLOR.radius, fontWeight: '600', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <IconDescargas /> Guardar archivo
+                </a>
+              ) : (
+                <button
+                  disabled={['en_cola', 'buscando', 'descargando'].includes(trabajo?.estado)}
+                  onClick={iniciarDescargaEscena}
+                  style={{ backgroundColor: COLOR.accent, color: '#fff', border: 'none', padding: '7px 14px', borderRadius: COLOR.radius, fontWeight: '600', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px', opacity: ['en_cola', 'buscando', 'descargando'].includes(trabajo?.estado) ? 0.6 : 1 }}
+                >
+                  <IconDescargas /> {trabajo?.estado === 'error' ? 'Reintentar' : 'Preparar descarga'}
+                </button>
+              )}
             </div>
           </div>
         </div>
