@@ -16,9 +16,9 @@ const API_BASE_URL = import.meta.env?.VITE_API_URL ?? 'http://127.0.0.1:8000/api
 
 const MAPAS_BASE = {
   "Google Satélite": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-  "Google Híbrido": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-  "Google Calles": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
-  "Google Relieve": "https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}"
+  "Esri Satélite HD": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  "OpenStreetMap": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  "CartoDB Oscuro": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
 };
 
 const CAPAS_CAROUSEL = [
@@ -90,11 +90,6 @@ const COLOR = {
   green: '#16a34a',
   radius: '3px'
 };
-
-// Tarjetas de escena: mucho más oscuras, cercanas al fondo del sitio
-const CARD_BG = '#0a0d12';
-const CARD_ACTIVA = '#111823';
-const CARD_HOVER = '#0f141b';
 
 const IconLogo = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
@@ -185,36 +180,6 @@ const IconSolEscena = () => (
     <line x1="4.6" y1="19.4" x2="6.4" y2="17.6" />
   </svg>
 );
-
-// Ícono que cambia según el porcentaje de nubosidad de la escena
-const IconNubosidadEscena = ({ pct }) => {
-  const n = Number(pct) || 0;
-  if (n < 10) return <IconSolEscena />;
-  const nube = 'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z';
-  const sol = (cx, cy, r) => <circle cx={cx} cy={cy} r={r} fill="#f4c542" />;
-  const props = { width: 14, height: 14, viewBox: '0 0 24 24', 'aria-hidden': true };
-  if (n < 35) {
-    return (
-      <svg {...props}>
-        {sol(9, 9, 5)}
-        <g transform="translate(8 9) scale(0.6)"><path d={nube} fill="#aab4c3" stroke="#0a0d12" strokeWidth="1.5" /></g>
-      </svg>
-    );
-  }
-  if (n < 75) {
-    return (
-      <svg {...props}>
-        {sol(8, 8, 4.5)}
-        <g transform="translate(4 6) scale(0.78)"><path d={nube} fill="#aab4c3" stroke="#0a0d12" strokeWidth="1.5" /></g>
-      </svg>
-    );
-  }
-  return (
-    <svg {...props}>
-      <path d={nube} fill="#7d889a" stroke="#4a5568" strokeWidth="1" transform="translate(1 2) scale(0.9)" />
-    </svg>
-  );
-};
 
 const IconInfoPixel = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
@@ -316,24 +281,6 @@ const guardarBlob = (data, nombre) => {
   window.URL.revokeObjectURL(url);
 };
 
-// Filas de información extra de una escena (para la ventana de "Más info")
-const detallesEscena = (e) => {
-  const hora = e.hora || e.datetime || e.fecha_hora;
-  const res = e.resolucion ?? e.resolution;
-  const elev = e.elevacion_solar ?? e.elevacionSolar ?? e.sun_elevation ?? e.sunElevation;
-  const filas = [
-    ['Nubosidad', e.nubosidad != null ? `${e.nubosidad}%` : null],
-    ['Elevación solar', elev != null && elev !== '' ? `${elev}°` : null],
-    ['ID de tesela', e.tile || e.id_tesela || e.idTesela || e.mgrs_tile],
-    ['Captura', hora ? `${hora}${String(hora).includes('UTC') ? '' : ' UTC'}` : null],
-    ['Órbita', e.orbita || e.relative_orbit || e.relativeOrbit],
-    ['Resolución', res ? `${res}${/^\d+(\.\d+)?$/.test(String(res)) ? ' m' : ''}` : null],
-    ['Procesamiento', e.nivel_procesamiento || e.processing_level || e.product_level],
-    ['Plataforma', e.plataforma || e.platform],
-  ];
-  return filas.filter(([, v]) => v !== null && v !== undefined && v !== '');
-};
-
 // ---------- Componentes de mapa ----------
 function ManejadorEventosMapa({ onClick }) {
   useMapEvents({ click: (e) => onClick(e.latlng) });
@@ -428,7 +375,7 @@ export default function App() {
   const [pestañaCapa, setPestañaCapa] = useState("TODAS LAS CAPAS");
   const [cargando, setCargando] = useState(false);
   const [descargandoRaster, setDescargandoRaster] = useState(false);
-  const [mapaBaseActual, setMapaBaseActual] = useState("Google Satélite");
+  const [mapaBaseActual, setMapaBaseActual] = useState("Esri Satélite HD");
 
   const [inputBusqueda, setInputBusqueda] = useState("");
   const [centroMapa, setCentroMapa] = useState(null);
@@ -472,7 +419,7 @@ export default function App() {
   const [modalDescargaAbierto, setModalDescargaAbierto] = useState(false);
   const [escenaModal, setEscenaModal] = useState(null);
   const [bandasSeleccionadas, setBandasSeleccionadas] = useState([]);
-  const [infoHover, setInfoHover] = useState(null);
+  const [escenaInfoHoverId, setEscenaInfoHoverId] = useState(null);
 
   const loteActual = lotes.find(l => l.id === loteActivoId) || null;
   const urlCapaIndice = loteActual?.tileUrl || null;
@@ -829,13 +776,6 @@ export default function App() {
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', height: '100vh', width: '100vw', backgroundColor: COLOR.bg, overflow: 'hidden', fontFamily: "'Inter', 'Roboto', system-ui, -apple-system, sans-serif", fontSize: '12px', lineHeight: '1.4', letterSpacing: '-0.01em' }}>
 
-      <style>{`
-        .rango-oscuro{-webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:2px;outline:none;cursor:pointer}
-        .rango-oscuro::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;background:#8b95a5;border:2px solid #121720}
-        .rango-oscuro::-moz-range-thumb{width:8px;height:8px;border-radius:50%;background:#8b95a5;border:2px solid #121720}
-        .rango-oscuro:hover::-webkit-slider-thumb{background:#c4ccd8}
-      `}</style>
-
       <input type="file" ref={fileInputRef} onChange={manejarCargaArchivo} accept=".zip,.geojson,.json" style={{ display: 'none' }} />
 
       {toast && (
@@ -986,12 +926,8 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '6px' }}>Nubosidad Máxima: {nubosidadMax}%</label>
-                    <input
-                      type="range" className="rango-oscuro" min="0" max="100" value={nubosidadMax}
-                      onChange={(e) => setNubosidadMax(Number(e.target.value))}
-                      style={{ background: `linear-gradient(to right, #3b4a63 ${nubosidadMax}%, #232d3f ${nubosidadMax}%)` }}
-                    />
+                    <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '3px' }}>Nubosidad Máxima: {nubosidadMax}%</label>
+                    <input type="range" min="0" max="100" value={nubosidadMax} onChange={(e) => setNubosidadMax(Number(e.target.value))} style={{ width: '100%', accentColor: COLOR.accent }} />
                   </div>
 
                   <div style={{ marginTop: '2px' }}>
@@ -1041,19 +977,22 @@ export default function App() {
               )}
               {loteActual && loteActual.escenas.map((e) => {
                 const estaSeleccionada = loteActual.escenaSeleccionada?.id === e.id;
+                const elevacionSolar = e.elevacion_solar ?? e.elevacionSolar ?? e.sun_elevation ?? e.sunElevation;
+                const idTesela = e.tile || e.id_tesela || e.idTesela || e.mgrs_tile;
+                const nivelProcesamiento = e.nivel_procesamiento || e.processing_level || e.product_level;
+                const plataforma = e.plataforma || e.platform;
+                const horaCaptura = e.hora || e.datetime || e.fecha_hora;
+                const orbita = e.orbita || e.relative_orbit || e.relativeOrbit;
+                const resolucion = e.resolucion ?? e.resolution;
+                const tieneDetalles = [e.nubosidad, elevacionSolar, idTesela, horaCaptura, orbita, resolucion, nivelProcesamiento, plataforma].some(
+                  (v) => v !== undefined && v !== null && v !== ''
+                );
 
                 return (
                   <div
                     key={e.id}
-                    data-escena="1"
                     onClick={() => seleccionarEscena(e, modoViz)}
-                    onMouseLeave={(evt) => {
-                      setInfoHover(null);
-                      evt.currentTarget.style.backgroundColor = estaSeleccionada ? CARD_ACTIVA : CARD_BG;
-                    }}
-                    onMouseEnter={(evt) => {
-                      evt.currentTarget.style.backgroundColor = estaSeleccionada ? CARD_ACTIVA : CARD_HOVER;
-                    }}
+                    onMouseLeave={() => setEscenaInfoHoverId(null)}
                     style={{
                       position: 'relative',
                       display: 'flex',
@@ -1064,24 +1003,17 @@ export default function App() {
                       minHeight: '102px',
                       padding: '10px',
                       gap: '12px',
-                      backgroundColor: estaSeleccionada ? CARD_ACTIVA : CARD_BG,
-                      border: `1px solid ${estaSeleccionada ? COLOR.accent : COLOR.borderSoft}`,
+                      backgroundColor: estaSeleccionada ? COLOR.cardActiveBg : COLOR.cardBg,
+                      border: `1px solid ${estaSeleccionada ? COLOR.accent : 'transparent'}`,
                       borderRadius: '4px',
                       cursor: 'pointer',
                       overflow: 'visible',
                       transition: 'background-color 0.15s ease, border-color 0.15s ease'
                     }}
+                    onMouseEnter={(evt) => {
+                      evt.currentTarget.style.backgroundColor = estaSeleccionada ? COLOR.cardActiveBg : '#1b2533';
+                    }}
                   >
-                    <button
-                      title="Descargar bandas"
-                      onClick={(evt) => abrirModalDescargaEscena(e, evt)}
-                      onMouseEnter={(evt) => { evt.currentTarget.style.color = '#ffffff'; }}
-                      onMouseLeave={(evt) => { evt.currentTarget.style.color = COLOR.textDim; }}
-                      style={{ position: 'absolute', top: '6px', right: '6px', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent', border: 'none', color: COLOR.textDim, cursor: 'pointer', padding: 0, zIndex: 2 }}
-                    >
-                      <IconDescargas />
-                    </button>
-
                     <img
                       src={e.thumb || placeholderSvg('sin miniatura')}
                       alt="miniatura de la escena"
@@ -1095,7 +1027,7 @@ export default function App() {
                         borderRadius: '4px',
                         border: 'none',
                         display: 'block',
-                        backgroundColor: '#0e1218'
+                        backgroundColor: '#161c24'
                       }}
                     />
 
@@ -1117,7 +1049,6 @@ export default function App() {
                           alignItems: 'center',
                           gap: '7px',
                           minWidth: 0,
-                          paddingRight: '24px',
                           color: '#ffffff',
                           fontSize: '12px',
                           lineHeight: '16px',
@@ -1154,7 +1085,7 @@ export default function App() {
                       >
                         <span>Nubosidad:</span>
                         <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-                          <IconNubosidadEscena pct={e.nubosidad} />
+                          <IconSolEscena />
                         </span>
                         <span style={{ color: '#d8dde5', fontWeight: 500 }}>
                           {e.nubosidad !== undefined && e.nubosidad !== null ? `${e.nubosidad}%` : '—'}
@@ -1179,16 +1110,11 @@ export default function App() {
                           role="button"
                           tabIndex={0}
                           onClick={(evt) => evt.stopPropagation()}
-                          onMouseEnter={(evt) => {
-                            const r = evt.currentTarget.closest('[data-escena]').getBoundingClientRect();
-                            setInfoHover({
-                              escena: e,
-                              left: r.right + 8,
-                              top: Math.min(Math.max(r.top, 8), window.innerHeight - 260)
-                            });
-                          }}
-                          onMouseLeave={() => setInfoHover(null)}
+                          onMouseEnter={() => setEscenaInfoHoverId(e.id)}
+                          onFocus={() => setEscenaInfoHoverId(e.id)}
+                          onBlur={() => setEscenaInfoHoverId(null)}
                           style={{
+                            position: 'relative',
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: '5px',
@@ -1202,6 +1128,57 @@ export default function App() {
                         >
                           <IconInfoPixel />
                           <span style={{ lineHeight: '15px' }}>Más info</span>
+
+                          {escenaInfoHoverId === e.id && tieneDetalles && (
+                            <div
+                              onMouseEnter={() => setEscenaInfoHoverId(e.id)}
+                              style={{
+                                position: 'absolute',
+                                left: '-5px',
+                                bottom: '22px',
+                                width: '220px',
+                                boxSizing: 'border-box',
+                                padding: '10px 11px',
+                                backgroundColor: '#06111d',
+                                border: '1px solid #283646',
+                                borderRadius: '5px',
+                                boxShadow: '0 8px 24px rgba(0,0,0,0.55)',
+                                zIndex: 1000,
+                                color: '#d8dde5',
+                                pointerEvents: 'none'
+                              }}
+                            >
+                              <div style={{ marginBottom: '7px', color: '#ffffff', fontSize: '11px', fontWeight: 600 }}>
+                                Imagen abierta
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '10px', lineHeight: '14px', color: '#9eaab8' }}>
+                                {e.nubosidad !== undefined && e.nubosidad !== null && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Nubosidad:</strong> {e.nubosidad}%</div>
+                                )}
+                                {elevacionSolar !== undefined && elevacionSolar !== null && elevacionSolar !== '' && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Elevación solar:</strong> {elevacionSolar}°</div>
+                                )}
+                                {idTesela && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>ID de tesela:</strong> {idTesela}</div>
+                                )}
+                                {horaCaptura && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Captura:</strong> {horaCaptura}{typeof horaCaptura === 'string' && !String(horaCaptura).includes('UTC') ? ' UTC' : ''}</div>
+                                )}
+                                {orbita && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Órbita:</strong> {orbita}</div>
+                                )}
+                                {resolucion && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Resolución:</strong> {resolucion}{typeof resolucion === 'number' || /^\d+(?:\.\d+)?$/.test(String(resolucion)) ? ' m' : ''}</div>
+                                )}
+                                {nivelProcesamiento && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Procesamiento:</strong> {nivelProcesamiento}</div>
+                                )}
+                                {plataforma && (
+                                  <div><strong style={{ color: '#dfe4eb' }}>Plataforma:</strong> {plataforma}</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1273,12 +1250,8 @@ export default function App() {
               </div>
 
               <div>
-                <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '6px' }}>Opacidad: {opacidadAmbientacion}%</label>
-                <input
-                  type="range" className="rango-oscuro" min="10" max="100" value={opacidadAmbientacion}
-                  onChange={(e) => setOpacidadAmbientacion(Number(e.target.value))}
-                  style={{ background: `linear-gradient(to right, #3b4a63 ${((opacidadAmbientacion - 10) / 90) * 100}%, #232d3f ${((opacidadAmbientacion - 10) / 90) * 100}%)` }}
-                />
+                <label style={{ fontSize: '11px', color: COLOR.textDim, display: 'block', marginBottom: '3px' }}>Opacidad: {opacidadAmbientacion}%</label>
+                <input type="range" min="10" max="100" value={opacidadAmbientacion} onChange={(e) => setOpacidadAmbientacion(e.target.value)} style={{ width: '100%', accentColor: COLOR.accent }} />
               </div>
 
               <button
@@ -1509,7 +1482,7 @@ export default function App() {
             <ControllerCentradoMapa destino={centroMapa} />
             <ManejadorEventosMapa onClick={manejarClickMapa} />
 
-            <TileLayer url={MAPAS_BASE[mapaBaseActual]} key={mapaBaseActual} maxZoom={20} />
+            <TileLayer url={MAPAS_BASE[mapaBaseActual]} />
             {urlCapaIndice && <TileLayer url={urlCapaIndice} key={urlCapaIndice} />}
             {zonasCalculadas && urlCapaAmbientacion && (
               <TileLayer
@@ -1519,20 +1492,14 @@ export default function App() {
               />
             )}
 
-            {/* Lote en dibujo: siempre cerrado (polígono) */}
-            {puntosPoligono.length > 1 && (
-              <Polygon
-                positions={puntosPoligono}
-                pathOptions={{ color: '#2563eb', weight: 2, dashArray: '4, 4', fillColor: '#2563eb', fillOpacity: 0.12, interactive: false }}
-              />
-            )}
+            {puntosPoligono.length > 0 && <Polyline positions={puntosPoligono} pathOptions={{ color: '#2563eb', weight: 2, dashArray: '4, 4' }} />}
             {puntosPoligono.map((pt, idx) => <CircleMarker key={`draw_${idx}`} center={pt} radius={4} pathOptions={{ color: '#2563eb', fillColor: '#ffffff', fillOpacity: 1 }} />)}
 
             {puntosMedicion.length > 0 && <Polyline positions={puntosMedicion} pathOptions={{ color: '#f59e0b', weight: 2 }} />}
             {puntosMedicion.map((pt, idx) => <CircleMarker key={`med_${idx}`} center={pt} radius={4} pathOptions={{ color: '#f59e0b', fillColor: '#ffffff', fillOpacity: 1 }} />)}
 
             {loteActual && (loteActual.contornos || []).map((c, i) => (
-              <Polygon key={`${loteActual.id}_${i}`} positions={c} pathOptions={{ color: '#ffffff', weight: 1.5, fillColor: 'transparent', interactive: false }} />
+              <Polygon key={`${loteActual.id}_${i}`} positions={c} pathOptions={{ color: '#ffffff', weight: 1.5, fillColor: 'transparent' }} />
             ))}
 
             {posicionPixelInfo && (
@@ -1584,18 +1551,11 @@ export default function App() {
               .map((capa) => {
                 const activa = modoViz === capa.id;
                 return (
-                  <div
-                    key={capa.id}
-                    onClick={() => (loteActual?.escenaSeleccionada ? seleccionarEscena(loteActual.escenaSeleccionada, capa.id) : avisar('Selecciona una escena en "Imágenes abiertas" para aplicar una capa.', 'info'))}
-                    style={{ position: 'relative', width: '100px', height: '80px', borderRadius: COLOR.radius, overflow: 'hidden', border: `2px solid ${activa ? COLOR.accent : COLOR.borderSoft}`, backgroundColor: '#000', flexShrink: 0, cursor: 'pointer' }}
-                  >
-                    <img
-                      src={capa.thumbLocal}
-                      alt={capa.nombre}
-                      onError={(e) => { e.target.onerror = null; e.target.src = placeholderSvg(capa.nombre); }}
-                      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform: 'scale(1.35)' }}
-                    />
-                    <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '10px 3px 3px', background: 'linear-gradient(to top, rgba(9,12,16,0.92), rgba(9,12,16,0))', color: COLOR.text, fontSize: '10px', textAlign: 'center', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <div key={capa.id} onClick={() => (loteActual?.escenaSeleccionada ? seleccionarEscena(loteActual.escenaSeleccionada, capa.id) : avisar('Selecciona una escena en "Imágenes abiertas" para aplicar una capa.', 'info'))} style={{ width: '100px', height: '80px', borderRadius: COLOR.radius, overflow: 'hidden', border: `2px solid ${activa ? COLOR.accent : COLOR.borderSoft}`, backgroundColor: COLOR.panel, flexShrink: 0, cursor: 'pointer', display: 'flex', flexDirection: 'column' }}>
+                    <div style={{ flex: 1, backgroundColor: '#000' }}>
+                      <img src={capa.thumbLocal} alt={capa.nombre} onError={(e) => { e.target.onerror = null; e.target.src = placeholderSvg(capa.nombre); }} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    </div>
+                    <div style={{ backgroundColor: activa ? COLOR.cardActiveBg : COLOR.panel, padding: '3px', color: COLOR.text, fontSize: '10px', textAlign: 'center', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {capa.nombre}
                     </div>
                   </div>
@@ -1605,22 +1565,6 @@ export default function App() {
         </div>
 
       </div>
-
-      {/* VENTANA FLOTANTE "MÁS INFO" (fuera de la tarjeta, no tapa su contenido) */}
-      {infoHover && (() => {
-        const filas = detallesEscena(infoHover.escena);
-        if (filas.length === 0) return null;
-        return (
-          <div style={{ position: 'fixed', left: infoHover.left, top: infoHover.top, width: '220px', boxSizing: 'border-box', padding: '10px 11px', backgroundColor: '#06090d', border: `1px solid ${COLOR.border}`, borderRadius: '4px', boxShadow: '0 8px 24px rgba(0,0,0,0.6)', zIndex: 3500, pointerEvents: 'none' }}>
-            <div style={{ marginBottom: '7px', color: '#fff', fontSize: '11px', fontWeight: 600 }}>Imagen abierta</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '10px', lineHeight: '14px', color: COLOR.textDim }}>
-              {filas.map(([k, v]) => (
-                <div key={k}><strong style={{ color: '#dfe4eb' }}>{k}:</strong> {v}</div>
-              ))}
-            </div>
-          </div>
-        );
-      })()}
 
       {/* MODAL DE DESCARGA DE BANDAS */}
       {modalDescargaAbierto && escenaModal && (
@@ -1659,17 +1603,21 @@ export default function App() {
               </div>
 
               <div style={{ maxHeight: '180px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', paddingRight: '4px' }}>
-                {BANDAS_DISPONIBLES[familiaDe(escenaModal)].map((b) => (
-                  <label key={b.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLOR.panelAlt, border: `1px solid ${COLOR.borderSoft}`, padding: '6px 10px', borderRadius: COLOR.radius, cursor: 'pointer' }}>
-                    <span style={{ fontSize: '11px', color: COLOR.text }}>{b.nombre}</span>
-                    <input
-                      type="checkbox"
-                      checked={bandasSeleccionadas.includes(b.id)}
-                      onChange={() => toggleBandaModal(b.id)}
-                      style={{ accentColor: COLOR.accent }}
-                    />
-                  </label>
-                ))}
+                {(() => {
+                  const esLandsat = escenaModal.satelite && escenaModal.satelite.toLowerCase().includes('landsat');
+                  const familia = esLandsat ? "Landsat" : "Sentinel-2";
+                  return BANDAS_DISPONIBLES[familia].map((b) => (
+                    <label key={b.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLOR.panelAlt, border: `1px solid ${COLOR.borderSoft}`, padding: '6px 10px', borderRadius: COLOR.radius, cursor: 'pointer' }}>
+                      <span style={{ fontSize: '11px', color: COLOR.text }}>{b.nombre}</span>
+                      <input
+                        type="checkbox"
+                        checked={bandasSeleccionadas.includes(b.id)}
+                        onChange={() => toggleBandaModal(b.id)}
+                        style={{ accentColor: COLOR.accent }}
+                      />
+                    </label>
+                  ));
+                })()}
               </div>
             </div>
 

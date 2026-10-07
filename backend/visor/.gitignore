@@ -1,0 +1,15 @@
+# Dependencias y entornos
+node_modules/
+.venv/
+venv/
+__pycache__/
+
+# Archivos de construcción y temporales
+dist/
+build/
+descargas_temp/
+*.zip
+*.tif
+
+# Claves locales
+.env
