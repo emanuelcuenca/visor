@@ -6,6 +6,7 @@ import math
 import os
 import tempfile
 import time
+import unicodedata
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -84,8 +85,9 @@ PALETAS_ZONAS = {
     2: ["#d73027", "#1a9850"],
     3: ["#d73027", "#ffffbf", "#1a9850"],
     4: ["#d73027", "#fdae61", "#a6d96a", "#1a9850"],
-    5: ["#d73027", "#fc8d59", "#fee08b", "#d9ef8b", "#91cf60", "#1a9850"],
+    5: ["#d73027", "#fc8d59", "#fee08b", "#91cf60", "#1a9850"],
 }
+assert all(len(v) == n for n, v in PALETAS_ZONAS.items())
 
 # --------------------------------------------------------------------------
 # Modelos de request
@@ -189,11 +191,11 @@ async def _ejecutar(fn, *args):
     try:
         return await loop.run_in_executor(executor, fn, *args)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ee.EEException as e:
-        raise HTTPException(status_code=502, detail=f"Earth Engine: {e}")
+        raise HTTPException(status_code=502, detail=f"Earth Engine: {e}") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 def _geometria(geojson: dict) -> ee.Geometry:
@@ -341,6 +343,12 @@ def _escala_segura(geom, escala_base: float, n_bandas: int, limite_bytes: float 
     return int(math.ceil(escala))
 
 
+def _nombre_archivo(texto: str) -> str:
+    """Nombre seguro para Content-Disposition: sin tildes, barras ni espacios."""
+    ascii_ = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    return ascii_.replace("/", "-").replace(" ", "_") or "archivo"
+
+
 def _bajar(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=300) as r:
         return r.read()
@@ -406,8 +414,9 @@ def _buscar_escenas_sync(req: BuscarEscenasRequest):
         except Exception:
             return None
 
-    for escena, thumb in zip(encontradas, executor_thumbs.map(miniatura, encontradas)):
-        escena["thumb"] = thumb
+    miniaturas = list(executor_thumbs.map(miniatura, encontradas))
+    for i, escena in enumerate(encontradas):
+        escena["thumb"] = miniaturas[i]
         escena.pop("_ms", None)
 
     resultado = {"escenas": encontradas}
@@ -472,7 +481,14 @@ async def capturar_capa(req: CapturarCapaRequest):
 # --------------------------------------------------------------------------
 # Zonas de manejo
 # --------------------------------------------------------------------------
+def _percentil(stats: dict, banda: str, p: int):
+    """Con un solo percentil Earth Engine nombra la salida como la banda; con varios, '<banda>_p<N>'."""
+    return stats.get(f"{banda}_p{p}", stats.get(banda))
+
+
 def _clasificar(req: ZonasRequest):
+    if req.escena_id == SRTM_ID:
+        raise ValueError("Las zonas de manejo se calculan sobre una escena satelital, no sobre el DEM.")
     geom = _geometria(req.geojson)
     escala = _escala(req.escena_id)
     n = req.num_clusters
@@ -481,14 +497,14 @@ def _clasificar(req: ZonasRequest):
 
     if req.metodo == "intervalos":
         st = img_idx.reduceRegion(ee.Reducer.percentile([2, 98]), **opciones).getInfo()
-        lo, hi = st.get(f"{req.indice}_p2"), st.get(f"{req.indice}_p98")
+        lo, hi = _percentil(st, req.indice, 2), _percentil(st, req.indice, 98)
         if lo is None or hi is None:
             raise ValueError("No hay píxeles válidos en el lote (¿todo nubes o sombra?).")
         cortes = [lo + (hi - lo) * i / n for i in range(1, n)]
     else:
         pcts = [round(i * 100 / n) for i in range(1, n)]
         st = img_idx.reduceRegion(ee.Reducer.percentile(pcts), **opciones).getInfo()
-        cortes = [st.get(f"{req.indice}_p{p}") for p in pcts]
+        cortes = [_percentil(st, req.indice, p) for p in pcts]
         if any(c is None for c in cortes):
             raise ValueError("No hay píxeles válidos en el lote (¿todo nubes o sombra?).")
 
@@ -604,7 +620,7 @@ async def descargar_vector_ambientacion(req: DescargarVectorRequest):
 def _descargar_raster_sync(req: DescargarRasterRequest):
     geom = _geometria(req.geojson)
     img, vis = _recortada(req.escena_id, req.modo_viz, req.enmascarar_nubes, geom)
-    nombre = f"{req.modo_viz}".replace("/", "-").replace(" ", "_")
+    nombre = _nombre_archivo(req.modo_viz)
 
     if req.formato == "png":
         url = img.getThumbURL({**vis, "region": geom, "dimensions": 2048, "format": "png"})
@@ -621,7 +637,7 @@ def _descargar_raster_sync(req: DescargarRasterRequest):
 @app.post("/api/descargar-raster")
 async def descargar_raster(req: DescargarRasterRequest):
     contenido, mime, ext, escala = await _ejecutar(_descargar_raster_sync, req)
-    headers = {"Content-Disposition": f'attachment; filename="{req.modo_viz.replace("/", "-")}.{ext}"'}
+    headers = {"Content-Disposition": f'attachment; filename="{_nombre_archivo(req.modo_viz)}.{ext}"'}
     if escala:
         headers["X-Escala-Usada"] = str(escala)
     return Response(contenido, media_type=mime, headers=headers)
@@ -635,7 +651,12 @@ def _identificar_pixel_sync(req: IdentificarPixelRequest):
     img = _procesar(req.escena_id, req.indice, req.enmascarar_nubes)
     val = img.reduceRegion(ee.Reducer.first(), punto, _escala(req.escena_id)).getInfo() or {}
     valores = {k: round(v, 4) for k, v in val.items() if v is not None}
-    valor = next(iter(valores.values())) if len(valores) == 1 else "N/A" if not valores else None
+    if not valores:
+        valor = "N/A"
+    elif len(valores) == 1:
+        valor = next(iter(valores.values()))
+    else:
+        valor = None  # composición de varias bandas: se devuelve el detalle en "valores"
     return {"lat": req.lat, "lng": req.lng, "valor": valor, "valores": valores}
 
 

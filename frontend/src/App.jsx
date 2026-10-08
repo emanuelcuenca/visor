@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { MapContainer, TileLayer, useMapEvents, useMap, Polygon, Polyline, CircleMarker, Popup } from 'react-leaflet';
 import axios from 'axios';
 import shp from 'shpjs';
@@ -86,7 +86,6 @@ const CLAVE_DESCARGAS = 'geosat_descargas_ids';
 
 const INFO_SECCION = {
   imagenes: { eyebrow: 'Catálogo satelital', titulo: 'Explorar imágenes' },
-  zonas: { eyebrow: 'Análisis espacial', titulo: 'Zonas de manejo' },
   tendencia: { eyebrow: 'Análisis temporal', titulo: 'Tendencia vegetal' },
   lote: { eyebrow: 'Capas y análisis', titulo: 'Gestión de lote' },
   areas: { eyebrow: 'Gestión del espacio de trabajo', titulo: 'Mis áreas' },
@@ -192,7 +191,6 @@ const NAV_ESPACIO = {
       titulo: 'Análisis',
       items: [
         { id: 'imagenes', label: 'Explorar imágenes', Icon: IconImagenes },
-        { id: 'zonas', label: 'Zonas de manejo', Icon: IconCapas },
         { id: 'tendencia', label: 'Tendencia temporal', Icon: IconTendencia },
         { id: 'comparar', label: 'Comparar escenas', Icon: IconComparar, pronto: true }
       ]
@@ -302,6 +300,35 @@ const placeholderSvg = (texto) =>
 
 const nombreSeguro = (texto) => String(texto || 'archivo').replace(/[\\/:*?"<>|\s]+/g, '_');
 
+const nuevoId = (prefijo) => `${prefijo}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+const etiquetaLote = (l) => (l?.nombre || '').trim() || 'Lote sin nombre';
+
+const MESES_CORTOS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+const fechaCorta = (t) => {
+  const d = new Date(t);
+  return `${d.getUTCDate()} ${MESES_CORTOS[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`;
+};
+const fechaLarga = (iso) => String(iso || '').split('-').reverse().join('/');
+
+const colorSat = (sat) => (sat === 'Landsat' ? '#f59e0b' : '#3b82f6');
+
+const resumenSerie = (puntos) => {
+  if (!puntos?.length) return null;
+  const v = puntos.map((p) => p.valor);
+  return { n: v.length, min: Math.min(...v), max: Math.max(...v), media: v.reduce((a, b) => a + b, 0) / v.length };
+};
+
+// La fecha de la capa solo se marca si cae dentro del rango de la serie
+const marcaEnRango = (puntos, marca) => {
+  if (!marca || !puntos?.length) return false;
+  const tm = new Date(marca).getTime();
+  const ts = puntos.map((p) => new Date(p.fecha).getTime());
+  const t0 = Math.min(...ts);
+  const t1 = Math.max(...ts);
+  return Number.isFinite(tm) && t1 !== t0 && tm >= t0 && tm <= t1;
+};
+
 const guardarBlob = (data, nombre) => {
   const url = window.URL.createObjectURL(new Blob([data]));
   const a = document.createElement('a');
@@ -314,10 +341,10 @@ const guardarBlob = (data, nombre) => {
 };
 
 const leerIds = () => {
-  try { return JSON.parse(localStorage.getItem(CLAVE_DESCARGAS)) || []; } catch (_) { return []; }
+  try { return JSON.parse(localStorage.getItem(CLAVE_DESCARGAS)) || []; } catch { return []; }
 };
 const guardarIds = (ids) => {
-  try { localStorage.setItem(CLAVE_DESCARGAS, JSON.stringify(ids.slice(0, 50))); } catch (_) { /* sin almacenamiento */ }
+  try { localStorage.setItem(CLAVE_DESCARGAS, JSON.stringify(ids.slice(0, 50))); } catch { /* sin almacenamiento */ }
 };
 
 // ---------- Componentes de mapa ----------
@@ -357,7 +384,10 @@ function LeyendaIndice({ titulo, vis }) {
 function FilaCapa({ capa, activa, onSelect, onQuitar, onDescargar }) {
   return (
     <div className={`gs-capa-card ${activa ? 'active' : ''}`} onClick={onSelect} role="button" tabIndex={0}
-      onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onSelect()} aria-pressed={activa}>
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return; // los botones internos (TIF, ×) manejan su propia tecla
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
+      }} aria-pressed={activa}>
       <span className="gs-capa-text">
         <span className="gs-capa-name">{capa.nombre}</span>
         <span className="gs-capa-meta">{capa.satelite}</span>
@@ -390,48 +420,170 @@ function ContenidoPixel({ cargando, datos, indice }) {
   );
 }
 
-function GraficoSerie({ puntos, indice, marca }) {
-  if (!puntos?.length) {
-    return <div className="gs-chart-empty">No hay datos válidos en el período (nubes o sin pasadas del satélite). Ampliá las fechas o los sensores.</div>;
-  }
-  const W = 330, H = 170, m = { l: 36, r: 8, t: 8, b: 22 };
-  const tiempos = puntos.map((p) => new Date(p.fecha).getTime());
-  const valores = puntos.map((p) => p.valor);
-  const t0 = Math.min(...tiempos), t1 = Math.max(...tiempos);
-  const rango = Math.max(...valores) - Math.min(...valores) || 0.1;
-  const lo = Math.min(...valores) - rango * 0.1, hi = Math.max(...valores) + rango * 0.1;
-  const x = (t) => m.l + (t1 === t0 ? (W - m.l - m.r) / 2 : ((t - t0) / (t1 - t0)) * (W - m.l - m.r));
-  const y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
-  const linea = puntos.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(tiempos[i]).toFixed(1)},${y(p.valor).toFixed(1)}`).join(' ');
-  const marcas = [0, 1, 2, 3].map((i) => lo + ((hi - lo) * i) / 3);
-  const corta = (f) => f.slice(2).replace(/-/g, '/');
-  const tm = marca ? new Date(marca).getTime() : null;
-  const hayMarca = tm !== null && t1 !== t0 && tm >= t0 && tm <= t1;
+function LeyendaSerie({ hayMarca }) {
   return (
-    <>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label={`Serie temporal de ${indice}`}>
-        {marcas.map((v) => (
+    <div className="gs-chart-legend">
+      <span><i style={{ background: colorSat('Sentinel-2') }} /> Sentinel-2</span>
+      <span><i style={{ background: colorSat('Landsat') }} /> Landsat</span>
+      {hayMarca && <span><i style={{ background: '#22c55e', borderRadius: 0, width: 2 }} /> Fecha de la capa</span>}
+    </div>
+  );
+}
+
+// Con grande=true ocupa todo el espacio disponible de su contenedor y se re-dibuja al cambiar de tamaño
+function GraficoSerie({ puntos, indice, marca, grande = false }) {
+  const contenedorRef = useRef(null);
+  const [dim, setDim] = useState({ w: 0, h: 0 });
+  const [hover, setHover] = useState(null);
+
+  useEffect(() => {
+    const el = contenedorRef.current;
+    if (!grande || !el) return undefined;
+    const observador = new ResizeObserver(([entrada]) => {
+      setDim({ w: Math.floor(entrada.contentRect.width), h: Math.floor(entrada.contentRect.height) });
+    });
+    observador.observe(el);
+    return () => observador.disconnect();
+  }, [grande]);
+
+  const hayDatos = !!puntos?.length;
+  const hayMarca = marcaEnRango(puntos, marca);
+  const W = grande ? dim.w : 330;
+  const H = grande ? dim.h : 170;
+  let contenido = hayDatos ? null : (
+    <div className="gs-chart-empty">No hay datos válidos en el período (nubes o sin pasadas del satélite). Ampliá las fechas o los sensores.</div>
+  );
+
+  if (hayDatos && W > 0 && H > 0) {
+    const serie = [...puntos].sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0));
+    const m = grande ? { l: 56, r: 22, t: 24, b: 34 } : { l: 36, r: 8, t: 8, b: 22 };
+    const fs = grande ? 12 : 9;
+    const anchoUtil = Math.max(W - m.l - m.r, 1);
+    const altoUtil = Math.max(H - m.t - m.b, 1);
+    const tiempos = serie.map((p) => new Date(p.fecha).getTime());
+    const valores = serie.map((p) => p.valor);
+    const t0 = tiempos[0];
+    const t1 = tiempos[tiempos.length - 1];
+    const rango = Math.max(...valores) - Math.min(...valores) || 0.1;
+    const lo = Math.min(...valores) - rango * 0.1;
+    const hi = Math.max(...valores) + rango * 0.1;
+    const x = (t) => m.l + (t1 === t0 ? anchoUtil / 2 : ((t - t0) / (t1 - t0)) * anchoUtil);
+    const y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * altoUtil;
+    const linea = serie.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(tiempos[i]).toFixed(1)},${y(p.valor).toFixed(1)}`).join(' ');
+
+    const nY = grande ? 5 : 4;
+    const marcasY = Array.from({ length: nY }, (_, i) => lo + ((hi - lo) * i) / (nY - 1));
+    const nX = grande ? Math.max(2, Math.min(8, Math.floor(anchoUtil / 120))) : 2;
+    const marcasX = t1 === t0 ? [t0] : Array.from({ length: nX }, (_, i) => t0 + ((t1 - t0) * i) / (nX - 1));
+    const anclaX = (i) => (marcasX.length === 1 ? 'middle' : i === 0 ? 'start' : i === marcasX.length - 1 ? 'end' : 'middle');
+
+    const tm = hayMarca ? new Date(marca).getTime() : null;
+    const idxHover = grande && hover !== null && hover < serie.length ? hover : null;
+    const pHover = idxHover !== null ? serie[idxHover] : null;
+
+    const alMover = (e) => {
+      const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
+      let mejor = 0;
+      let dist = Infinity;
+      tiempos.forEach((t, i) => {
+        const d = Math.abs(x(t) - px);
+        if (d < dist) { dist = d; mejor = i; }
+      });
+      setHover(mejor);
+    };
+
+    contenido = (
+      <svg
+        width={grande ? W : undefined}
+        height={grande ? H : undefined}
+        viewBox={`0 0 ${W} ${H}`}
+        style={grande ? { display: 'block' } : { width: '100%', height: 'auto' }}
+        role="img"
+        aria-label={`Serie temporal de ${indice}`}
+        onMouseMove={grande ? alMover : undefined}
+        onMouseLeave={grande ? () => setHover(null) : undefined}
+      >
+        {marcasY.map((v) => (
           <g key={v}>
             <line className="gs-chart-grid" x1={m.l} x2={W - m.r} y1={y(v)} y2={y(v)} />
-            <text className="gs-chart-label" x={m.l - 4} y={y(v) + 3} fontSize="9" textAnchor="end">{v.toFixed(2)}</text>
+            <text className="gs-chart-label" x={m.l - 6} y={y(v) + 4} fontSize={fs} textAnchor="end">{v.toFixed(2)}</text>
           </g>
         ))}
-        {hayMarca && <line className="gs-chart-mark" x1={x(tm)} x2={x(tm)} y1={m.t} y2={H - m.b} strokeDasharray="4 3" />}
-        <path className="gs-chart-line" d={linea} fill="none" strokeWidth="1.25" />
-        {puntos.map((p, i) => (
-          <circle key={`${p.fecha}_${p.sat}`} cx={x(tiempos[i])} cy={y(p.valor)} r="3" fill={p.sat === 'Landsat' ? '#f59e0b' : '#3b82f6'}>
-            <title>{`${p.fecha} · ${p.sat}: ${p.valor}`}</title>
+        {marcasX.map((t, i) => (
+          <g key={t}>
+            {grande && <line className="gs-chart-grid" x1={x(t)} x2={x(t)} y1={m.t} y2={H - m.b} />}
+            <text className="gs-chart-label" x={x(t)} y={H - (grande ? 10 : 6)} fontSize={fs} textAnchor={anclaX(i)}>{fechaCorta(t)}</text>
+          </g>
+        ))}
+        {hayMarca && (
+          <>
+            <line className="gs-chart-mark" x1={x(tm)} x2={x(tm)} y1={m.t} y2={H - m.b} strokeDasharray="4 3" />
+            {grande && (
+              <text className="gs-chart-mark-label" x={x(tm) + (x(tm) > W * 0.75 ? -5 : 5)} y={m.t + 12} fontSize={fs} textAnchor={x(tm) > W * 0.75 ? 'end' : 'start'}>
+                Fecha de la capa
+              </text>
+            )}
+          </>
+        )}
+        <path className="gs-chart-line" d={linea} fill="none" strokeWidth={grande ? 1.75 : 1.25} />
+        {serie.map((p, i) => (
+          <circle
+            key={`${p.fecha}_${p.sat}`}
+            cx={x(tiempos[i])}
+            cy={y(p.valor)}
+            r={grande ? (i === idxHover ? 6 : 4) : 3}
+            fill={colorSat(p.sat)}
+            stroke={grande ? 'var(--surface)' : 'none'}
+            strokeWidth="1.5"
+          >
+            <title>{`${fechaLarga(p.fecha)} · ${p.sat}: ${p.valor}`}</title>
           </circle>
         ))}
-        <text className="gs-chart-label" x={m.l} y={H - 6} fontSize="9">{corta(puntos[0].fecha)}</text>
-        <text className="gs-chart-label" x={W - m.r} y={H - 6} fontSize="9" textAnchor="end">{corta(puntos[puntos.length - 1].fecha)}</text>
+        {pHover && (
+          <g pointerEvents="none">
+            <line className="gs-chart-hover" x1={x(tiempos[idxHover])} x2={x(tiempos[idxHover])} y1={m.t} y2={H - m.b} />
+            <text className="gs-chart-readout" x={m.l + 4} y={m.t - 8} fontSize={fs + 1}>
+              {`${fechaLarga(pHover.fecha)} · ${pHover.sat} · ${indice} ${pHover.valor.toFixed(3)}`}
+            </text>
+          </g>
+        )}
       </svg>
-      <div className="gs-chart-legend">
-        <span><i style={{ background: '#3b82f6' }} /> Sentinel-2</span>
-        <span><i style={{ background: '#f59e0b' }} /> Landsat</span>
-        {hayMarca && <span><i style={{ background: '#22c55e', borderRadius: 0, width: 2 }} /> Fecha de la capa</span>}
-      </div>
-    </>
+    );
+  }
+
+  if (grande) return <div ref={contenedorRef} className="gs-chart-big">{contenido}</div>;
+  return hayDatos ? (<>{contenido}<LeyendaSerie hayMarca={hayMarca} /></>) : contenido;
+}
+
+// Curva ampliada: se dibuja sobre el espacio de trabajo (mapa) para verla en detalle
+function PanelCurva({ titulo, subtitulo, puntos, indice, marca, cargando, onCerrar }) {
+  const resumen = resumenSerie(puntos);
+  return (
+    <section className="gs-curva-panel" aria-label={titulo}>
+      <header className="gs-curva-head">
+        <div>
+          <div className="gs-curva-title">{titulo}</div>
+          <div className="gs-curva-sub">{subtitulo}</div>
+        </div>
+        <button className="gs-icon-btn" onClick={onCerrar} aria-label="Cerrar gráfico" title="Cerrar gráfico">×</button>
+      </header>
+      {cargando ? (
+        <div className="gs-curva-estado">Calculando la evolución… esto puede tardar unos segundos.</div>
+      ) : (
+        <>
+          {resumen && (
+            <div className="gs-curva-kpis">
+              <div className="gs-curva-kpi">Pasadas<strong>{resumen.n}</strong></div>
+              <div className="gs-curva-kpi">Media<strong>{resumen.media.toFixed(3)}</strong></div>
+              <div className="gs-curva-kpi">Mínimo<strong>{resumen.min.toFixed(3)}</strong></div>
+              <div className="gs-curva-kpi">Máximo<strong>{resumen.max.toFixed(3)}</strong></div>
+            </div>
+          )}
+          <GraficoSerie grande puntos={puntos} indice={indice} marca={marca} />
+          <LeyendaSerie hayMarca={marcaEnRango(puntos, marca)} />
+        </>
+      )}
+    </section>
   );
 }
 
@@ -441,6 +593,8 @@ export default function App() {
   const peticionEscenaRef = useRef(0);
   const toastTimerRef = useRef(null);
   const estadosRef = useRef({});
+  const peticionSerieRef = useRef(0);
+  const selectorRef = useRef(null);
   const [fechasDefecto] = useState(obtenerFechasDefecto);
 
   const [espacioActivo, setEspacioActivo] = useState('agricultura');
@@ -455,7 +609,10 @@ export default function App() {
   const [capturando, setCapturando] = useState(false);
   const [capaAnalisisId, setCapaAnalisisId] = useState(null);
   const [curvaLote, setCurvaLote] = useState(null);
-  const [cargandoCurva, setCargandoCurva] = useState(false);
+  const [curvaCalculandoId, setCurvaCalculandoId] = useState(null);
+  const [curvaAbierta, setCurvaAbierta] = useState(false);
+  const [selectorAbierto, setSelectorAbierto] = useState(false);
+  const [zonasAbiertas, setZonasAbiertas] = useState(true);
   const [curvaDesde, setCurvaDesde] = useState(fechasDefecto.inicio);
   const [curvaHasta, setCurvaHasta] = useState(fechasDefecto.fin);
   const [mapaBaseActual, setMapaBaseActual] = useState('Google Satélite');
@@ -511,20 +668,50 @@ export default function App() {
   const modoTendencia = seccionActiva === 'tendencia' && !herramientaActiva;
   const hayDescargasActivas = descargas.some((d) => ESTADOS_ACTIVOS.includes(d.estado));
   const distanciaMedida = distanciaTotalM(puntosMedicion);
+  const cargandoCurva = !!capaAnalisis && curvaCalculandoId === capaAnalisis.id;
+  const zonasVisibles = ambientacion?.visible !== false;
+
+  // Gráfico que se muestra ampliado sobre el espacio de trabajo (mapa)
+  let curvaGrande = null;
+  if (seccionActiva === 'lote' && capaAnalisis && INDICES.includes(capaAnalisis.modo)) {
+    const resultado = curvaLote?.capaId === capaAnalisis.id ? curvaLote : null;
+    if (resultado || cargandoCurva) {
+      curvaGrande = {
+        titulo: `Curva de evolución del ${capaAnalisis.modo}`,
+        subtitulo: resultado
+          ? `${etiquetaLote(loteActual)} · media del lote · ${fechaLarga(resultado.desde)} al ${fechaLarga(resultado.hasta)}`
+          : `${etiquetaLote(loteActual)} · media del lote`,
+        puntos: resultado?.puntos || [],
+        indice: capaAnalisis.modo,
+        marca: capaAnalisis.fecha,
+        cargando: cargandoCurva
+      };
+    }
+  } else if (seccionActiva === 'tendencia' && puntoTendencia && (serieTendencia || cargandoSerie)) {
+    curvaGrande = {
+      titulo: `Serie temporal de ${indiceTendencia}`,
+      subtitulo: `Píxel en ${puntoTendencia[0].toFixed(5)}, ${puntoTendencia[1].toFixed(5)}`,
+      puntos: serieTendencia || [],
+      indice: indiceTendencia,
+      marca: null,
+      cargando: cargandoSerie
+    };
+  }
+  const mostrarCurva = curvaAbierta && !!curvaGrande;
 
   const actualizarLote = (id, cambios) =>
     setLotes((prev) => prev.map((l) => (l.id === id ? { ...l, ...cambios } : l)));
 
-  const avisar = (texto, tipo = 'error') => {
+  const avisar = useCallback((texto, tipo = 'error') => {
     setToast({ texto, tipo });
     clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToast(null), 6000);
-  };
+  }, []);
 
   const mensajeError = async (err, base) => {
     let detalle = err?.response?.data?.detail;
     if (!detalle && err?.response?.data instanceof Blob) {
-      try { detalle = JSON.parse(await err.response.data.text()).detail; } catch (_) { /* sin detalle */ }
+      try { detalle = JSON.parse(await err.response.data.text()).detail; } catch { /* sin detalle */ }
     }
     if (Array.isArray(detalle)) detalle = detalle.map((d) => d.msg).join('; ');
     if (!detalle && !err?.response) detalle = 'No se pudo conectar con el servidor.';
@@ -532,15 +719,15 @@ export default function App() {
   };
 
   // ---------- Herramientas del mapa ----------
-  const activarHerramienta = (nombre) => {
-    setModoDibujar(nombre === 'dibujar' ? !modoDibujar : false);
-    setModoIdentificar(nombre === 'identificar' ? !modoIdentificar : false);
-    setModoMedir(nombre === 'medir' ? !modoMedir : false);
+  const activarHerramienta = useCallback((nombre) => {
+    setModoDibujar((v) => (nombre === 'dibujar' ? !v : false));
+    setModoIdentificar((v) => (nombre === 'identificar' ? !v : false));
+    setModoMedir((v) => (nombre === 'medir' ? !v : false));
     setPuntosPoligono([]);
     setPuntosMedicion([]);
     setPosicionPixelInfo(null);
     setDatosPixel(null);
-  };
+  }, []);
 
   const irASeccion = (seccion) => {
     setSeccionActiva(seccion);
@@ -551,22 +738,40 @@ export default function App() {
   const toggleSensor = (id) =>
     setSensoresActivos((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
 
+  // La capa elegida en el selector del mapa es por lote: al cambiar de lote se sincroniza con la suya
+  const activarLoteEstado = (lote) => {
+    setLoteActivoId(lote ? lote.id : null);
+    setModoViz(lote?.modoCapa || 'RGB Clásico');
+    setPosicionPixelInfo(null);
+    setDatosPixel(null);
+    setSelectorAbierto(false);
+  };
+
   const seleccionarLote = (id, centrar = true) => {
-    setLoteActivoId(id);
     const l = lotes.find((item) => item.id === id);
-    if (centrar && l?.puntosCoords.length > 0) setCentroMapa({ coords: l.puntosCoords, t: Date.now() });
+    if (!l) return;
+    if (id !== loteActivoId) activarLoteEstado(l);
+    else setSelectorAbierto(false);
+    if (centrar && l.puntosCoords.length > 0) setCentroMapa({ coords: l.puntosCoords, t: Date.now() });
   };
 
   const eliminarLote = (id, e) => {
     e.stopPropagation();
     const restantes = lotes.filter((l) => l.id !== id);
     setLotes(restantes);
-    if (loteActivoId === id) setLoteActivoId(restantes.length > 0 ? restantes[0].id : null);
+    if (loteActivoId === id) activarLoteEstado(restantes[0] || null);
+  };
+
+  const nombreLoteNuevo = () => {
+    const usados = new Set(lotes.map((l) => l.nombre));
+    let n = lotes.length + 1;
+    while (usados.has(`Lote ${n}`)) n += 1;
+    return `Lote ${n}`;
   };
 
   const agregarLote = ({ nombre, origen, geojson, contornos }) => {
     const nuevo = {
-      id: `lote_${Date.now()}`,
+      id: nuevoId('lote'),
       nombre,
       origen,
       superficieHa: calcularAreaGeoJSONHa(geojson),
@@ -583,7 +788,7 @@ export default function App() {
       capas: []
     };
     setLotes((prev) => [...prev, nuevo]);
-    setLoteActivoId(nuevo.id);
+    activarLoteEstado(nuevo);
     return nuevo;
   };
 
@@ -618,7 +823,7 @@ export default function App() {
       type: 'FeatureCollection',
       features: [{ type: 'Feature', geometry: { type: 'Polygon', coordinates: [anillo] }, properties: {} }]
     };
-    agregarLote({ nombre: `Lote ${lotes.length + 1}`, origen: 'Dibujado', geojson: featureCollection, contornos: [puntosPoligono] });
+    agregarLote({ nombre: nombreLoteNuevo(), origen: 'Dibujado', geojson: featureCollection, contornos: [puntosPoligono] });
     setPuntosPoligono([]);
     setModoDibujar(false);
   };
@@ -646,7 +851,7 @@ export default function App() {
       if (contornos.length === 0) throw new Error('sin polígonos');
       const nuevo = agregarLote({ nombre: file.name.replace(/\.[^.]+$/, ''), origen: 'Archivo importado', geojson: featureCollection, contornos });
       setCentroMapa({ coords: nuevo.puntosCoords, t: Date.now() });
-    } catch (err) {
+    } catch {
       avisar('El archivo no tiene polígonos válidos. Usá .geojson, .json, .kml, .kmz o un .zip con shapefile.');
     }
   };
@@ -669,7 +874,7 @@ export default function App() {
       if (!r) { avisar(`No se encontró "${q}".`, 'info'); return; }
       const [s, n, w, e] = r.boundingbox.map(Number);
       setCentroMapa({ coords: [[s, w], [n, e]], t: Date.now() });
-    } catch (err) {
+    } catch {
       avisar('No se pudo buscar la ubicación.');
     }
   };
@@ -678,6 +883,7 @@ export default function App() {
   const buscarEscenas = async () => {
     if (!loteActual) { avisar('Dibujá o importá un área antes de buscar imágenes.', 'info'); return; }
     if (sensoresActivos.length === 0) { avisar('Activá al menos un sensor.', 'info'); return; }
+    if (!fechaInicio || !fechaFin || fechaInicio > fechaFin) { avisar('Revisá el rango de fechas: “Desde” debe ser anterior a “Hasta”.', 'info'); return; }
     const loteId = loteActivoId;
     setCargando(true);
     try {
@@ -739,14 +945,14 @@ export default function App() {
   const descargarRaster = async (formato, { escenaId, modo } = {}) => {
     const escena = escenaId || escenaActual?.id;
     if (!escena || !loteActual) return;
-    modo = modo || loteActual.modoCapa || modoViz;
+    const modoFinal = modo || loteActual.modoCapa || modoViz;
     setExportando(true);
     try {
       const res = await axios.post(`${API_BASE_URL}/descargar-raster`, {
-        escena_id: escena, modo_viz: modo, geojson: loteActual.geojson,
+        escena_id: escena, modo_viz: modoFinal, geojson: loteActual.geojson,
         formato, enmascarar_nubes: enmascararNubes
       }, { responseType: 'blob' });
-      guardarBlob(res.data, `${nombreSeguro(loteActual.nombre)}_${nombreSeguro(modo)}.${formato === 'png' ? 'png' : 'tif'}`);
+      guardarBlob(res.data, `${nombreSeguro(loteActual.nombre)}_${nombreSeguro(modoFinal)}.${formato === 'png' ? 'png' : 'tif'}`);
     } catch (err) {
       avisar(await mensajeError(err, 'No se pudo exportar la capa'));
     } finally {
@@ -772,7 +978,7 @@ export default function App() {
         escena_id: escenaActual.id, modo_viz: modo, geojson: loteActual.geojson, enmascarar_nubes: enmascararNubes
       });
       const capa = {
-        id: `capa_${Date.now()}`,
+        id: nuevoId('capa'),
         nombre: `${modo} · ${escenaActual.fecha || ''}`,
         modo,
         escenaId: escenaActual.id,
@@ -801,6 +1007,7 @@ export default function App() {
 
   // Al elegir una capa para analizar, la curva propone el período que termina un mes después de su fecha
   const seleccionarCapaAnalisis = (capa) => {
+    if (capa.id === capaAnalisisId) return;
     setCapaAnalisisId(capa.id);
     setCurvaLote(null);
     if (/^\d{4}-\d{2}-\d{2}$/.test(capa.fecha)) {
@@ -814,19 +1021,24 @@ export default function App() {
   const calcularCurvaLote = async () => {
     if (!capaAnalisis || !INDICES.includes(capaAnalisis.modo)) return;
     if (sensoresActivos.length === 0) { avisar('Activá al menos un sensor en Explorar imágenes.', 'info'); return; }
-    setCargandoCurva(true);
+    if (!curvaDesde || !curvaHasta || curvaDesde > curvaHasta) { avisar('Revisá el período de la curva: “Desde” debe ser anterior a “Hasta”.', 'info'); return; }
+    const capaId = capaAnalisis.id;
+    const desde = curvaDesde;
+    const hasta = curvaHasta;
+    setCurvaCalculandoId(capaId);
+    setCurvaAbierta(true);
     setCurvaLote(null);
     try {
       const res = await axios.post(`${API_BASE_URL}/serie-temporal-lote`, {
         geojson: loteActual.geojson, indice: capaAnalisis.modo,
-        fecha_inicio: curvaDesde, fecha_fin: curvaHasta,
+        fecha_inicio: desde, fecha_fin: hasta,
         sensores: sensoresActivos, nubosidad_max: Number(nubosidadMax), enmascarar_nubes: enmascararNubes
       });
-      setCurvaLote({ capaId: capaAnalisis.id, puntos: res.data.puntos || [] });
+      setCurvaLote({ capaId, puntos: res.data.puntos || [], desde, hasta });
     } catch (err) {
       avisar(await mensajeError(err, 'No se pudo calcular la curva de evolución'));
     } finally {
-      setCargandoCurva(false);
+      setCurvaCalculandoId((prev) => (prev === capaId ? null : prev));
     }
   };
   const toggleVisibleCapa = (id) => cambiarCapas((cs) => cs.map((c) => (c.id === id ? { ...c, visible: !c.visible } : c)));
@@ -844,7 +1056,7 @@ export default function App() {
   const toggleBandaModal = (bandaId) =>
     setBandasSeleccionadas((prev) => (prev.includes(bandaId) ? prev.filter((b) => b !== bandaId) : [...prev, bandaId]));
 
-  const refrescarDescargas = async () => {
+  const refrescarDescargas = useCallback(async () => {
     const ids = leerIds();
     if (ids.length === 0) { setDescargas([]); return; }
     try {
@@ -858,8 +1070,8 @@ export default function App() {
         estadosRef.current[d.job_id] = d.estado;
       });
       setDescargas(data);
-    } catch (_) { /* servidor no disponible: se reintenta */ }
-  };
+    } catch { /* servidor no disponible: se reintenta */ }
+  }, [avisar]);
 
   const iniciarDescargaEscena = async () => {
     if (!escenaModal) return;
@@ -899,15 +1111,27 @@ export default function App() {
     const alTeclear = (e) => { if (e.key === 'Escape') activarHerramienta(null); };
     window.addEventListener('keydown', alTeclear);
     return () => window.removeEventListener('keydown', alTeclear);
-  }, [herramientaActiva]);
+  }, [herramientaActiva, activarHerramienta]);
 
-  useEffect(() => { refrescarDescargas(); }, []);
+  useEffect(() => { refrescarDescargas(); }, [refrescarDescargas]);
+
+  useEffect(() => {
+    if (!selectorAbierto) return undefined;
+    const alClickFuera = (e) => { if (!selectorRef.current?.contains(e.target)) setSelectorAbierto(false); };
+    const alTeclear = (e) => { if (e.key === 'Escape') setSelectorAbierto(false); };
+    document.addEventListener('mousedown', alClickFuera);
+    window.addEventListener('keydown', alTeclear);
+    return () => {
+      document.removeEventListener('mousedown', alClickFuera);
+      window.removeEventListener('keydown', alTeclear);
+    };
+  }, [selectorAbierto]);
 
   useEffect(() => {
     if (!hayDescargasActivas) return undefined;
     const t = setInterval(refrescarDescargas, 2000);
     return () => clearInterval(t);
-  }, [hayDescargasActivas]);
+  }, [hayDescargasActivas, refrescarDescargas]);
 
   useEffect(() => {
     let vivo = true;
@@ -945,6 +1169,8 @@ export default function App() {
           areaTotalHa: res.data.area_total_ha,
           areaSinDatoHa: res.data.area_sin_dato_ha,
           indice: indiceAmbientacion,
+          escena: { fecha: escenaActual.fecha || '', satelite: escenaActual.satelite || '' },
+          visible: true,
           params
         }
       });
@@ -962,6 +1188,11 @@ export default function App() {
     if (loteActivoId) actualizarLote(loteActivoId, { ambientacion: null });
   };
 
+  const toggleVisibleZonas = () => {
+    if (!ambientacion || !loteActivoId) return;
+    actualizarLote(loteActivoId, { ambientacion: { ...ambientacion, visible: !zonasVisibles } });
+  };
+
   const descargarVectorZonas = async (formato) => {
     if (!ambientacion) return;
     setExportando(true);
@@ -977,22 +1208,26 @@ export default function App() {
 
   // ---------- Tendencia ----------
   const cargarSerie = async (lat, lng, indice = indiceTendencia) => {
+    if (!fechaInicio || !fechaFin || fechaInicio > fechaFin) { avisar('Revisá el rango de fechas: “Desde” debe ser anterior a “Hasta”.', 'info'); return; }
+    const peticion = ++peticionSerieRef.current;
     setPuntoTendencia([lat, lng]);
     setCargandoSerie(true);
     setSerieTendencia(null);
+    setCurvaAbierta(true);
     try {
       const res = await axios.post(`${API_BASE_URL}/serie-temporal-pixel`, {
         lat, lng, indice,
         fecha_inicio: fechaInicio,
         fecha_fin: fechaFin,
         sensores: sensoresActivos,
+        nubosidad_max: Number(nubosidadMax),
         enmascarar_nubes: enmascararNubes
       });
-      setSerieTendencia(res.data.puntos || []);
+      if (peticion === peticionSerieRef.current) setSerieTendencia(res.data.puntos || []);
     } catch (err) {
-      avisar(await mensajeError(err, 'Error obteniendo la serie temporal'));
+      if (peticion === peticionSerieRef.current) avisar(await mensajeError(err, 'Error obteniendo la serie temporal'));
     } finally {
-      setCargandoSerie(false);
+      if (peticion === peticionSerieRef.current) setCargandoSerie(false);
     }
   };
 
@@ -1114,9 +1349,24 @@ export default function App() {
         .gs-pop-error{color:var(--danger)}
 
         .gs-map-top{position:absolute;left:64px;right:18px;top:18px;z-index:600;display:flex;align-items:flex-start;justify-content:space-between;pointer-events:none}
-        .gs-map-title{pointer-events:auto;background:var(--overlay);border:1px solid var(--border);border-radius:10px;padding:11px 14px;box-shadow:0 5px 18px rgba(0,0,0,.4);width:290px}
+        .gs-map-title{position:relative;pointer-events:auto;background:var(--overlay);border:1px solid var(--border);border-radius:10px;padding:11px 14px;box-shadow:0 5px 18px rgba(0,0,0,.4);width:290px}
         .gs-map-title-main{font-size:13px;font-weight:750;color:var(--text)}
         .gs-map-title-sub{font-size:10px;color:var(--muted);margin-top:2px}
+        .gs-lote-trigger{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;border:0;background:transparent;padding:0;text-align:left;color:inherit;font:inherit}
+        button.gs-lote-trigger{cursor:pointer}
+        .gs-lote-trigger:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:6px}
+        .gs-lote-trigger-text{display:flex;flex-direction:column;min-width:0}
+        .gs-lote-trigger-text>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .gs-lote-chevron{flex:0 0 auto;color:var(--muted);font-size:13px;transition:transform .15s}
+        .gs-lote-trigger[aria-expanded="true"] .gs-lote-chevron{transform:rotate(180deg)}
+        .gs-lote-list{position:absolute;left:-1px;right:-1px;top:calc(100% + 6px);margin:0;padding:5px;list-style:none;max-height:min(280px,50vh);overflow:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.55);z-index:5}
+        .gs-lote-option{display:flex;align-items:center;justify-content:space-between;gap:9px;width:100%;border:0;background:transparent;border-radius:7px;padding:8px 9px;text-align:left;color:var(--text-2);cursor:pointer}
+        .gs-lote-option:hover{background:var(--hover);color:var(--text)}
+        .gs-lote-option.active{background:var(--accent-soft);color:var(--accent-text)}
+        .gs-lote-option-text{display:flex;flex-direction:column;min-width:0}
+        .gs-lote-option-text>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .gs-lote-option-name{font-size:12px;font-weight:700}
+        .gs-lote-option-meta{font-size:10px;color:var(--muted);margin-top:1px}
         .gs-map-tools{position:relative;display:flex;gap:7px;pointer-events:auto}
         .gs-tool{
           height:38px;background:var(--overlay);border:1px solid var(--border);border-radius:8px;padding:0 11px;
@@ -1260,6 +1510,22 @@ export default function App() {
         .gs-chart-line{stroke:var(--faint)}
         .gs-chart-empty{font-size:11px;color:var(--muted);padding:10px 0}
         .gs-chart-legend{display:flex;gap:14px;margin-top:6px;font-size:10px;color:var(--muted)}
+        .gs-chart-big{position:relative;flex:1;min-height:0;min-width:0;overflow:hidden}
+        .gs-chart-big .gs-chart-line{stroke:var(--muted)}
+        .gs-chart-big .gs-chart-empty{padding:28px 6px;font-size:12px}
+        .gs-chart-mark-label{fill:var(--green)}
+        .gs-chart-hover{stroke:var(--text-2);stroke-width:1;stroke-dasharray:3 3}
+        .gs-chart-readout{fill:var(--text);font-weight:650}
+        .gs-curva-panel{position:absolute;left:18px;right:18px;bottom:72px;height:min(56%,440px);z-index:550;display:flex;flex-direction:column;background:var(--overlay);border:1px solid var(--border);border-radius:12px;box-shadow:0 10px 34px rgba(0,0,0,.5);padding:12px 16px 10px}
+        .gs-curva-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+        .gs-curva-title{font-size:14px;font-weight:750;color:var(--text)}
+        .gs-curva-sub{font-size:10px;color:var(--muted);margin-top:2px}
+        .gs-curva-kpis{display:flex;gap:8px;margin:10px 0 8px;flex-wrap:wrap}
+        .gs-curva-kpi{padding:5px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface);font-size:10px;color:var(--muted)}
+        .gs-curva-kpi strong{display:block;font-size:13px;color:var(--text);margin-top:1px}
+        .gs-curva-estado{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px}
+        .gs-section-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;border:0;background:transparent;padding:0;margin-bottom:9px;cursor:pointer;color:inherit;font:inherit}
+        .gs-section-zonas{border-top:1px solid var(--border-soft);padding-top:14px}
         .gs-chart-legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
 
         .gs-toast{position:fixed;top:78px;left:50%;transform:translateX(-50%);z-index:3000;background:var(--surface-3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 14px;box-shadow:0 8px 28px rgba(0,0,0,.55);display:flex;align-items:center;gap:12px;font-size:11px;max-width:min(560px,calc(100vw - 40px))}
@@ -1375,14 +1641,19 @@ export default function App() {
                     </button>
                     {id === 'lote' && loteActual && (
                       <div className="gs-tree" role="group" aria-label="Capas del lote">
-                        {capasLote.length === 0 ? (
-                          <div className="gs-tree-empty">Sin capas capturadas</div>
-                        ) : capasLote.map((c) => (
+                        {capasLote.length === 0 && !ambientacion && <div className="gs-tree-empty">Sin capas capturadas</div>}
+                        {capasLote.map((c) => (
                           <label key={c.id} className="gs-tree-item" title={c.nombre}>
                             <input type="checkbox" checked={c.visible} onChange={() => toggleVisibleCapa(c.id)} />
                             <span>{c.nombre}</span>
                           </label>
                         ))}
+                        {ambientacion && (
+                          <label className="gs-tree-item" title={`Zonas de manejo · ${ambientacion.indice}`}>
+                            <input type="checkbox" checked={zonasVisibles} onChange={toggleVisibleZonas} />
+                            <span>Zonas de manejo · {ambientacion.indice}</span>
+                          </label>
+                        )}
                       </div>
                     )}
                     </React.Fragment>
@@ -1405,8 +1676,8 @@ export default function App() {
             <MapContainer center={[-27.4, -66.3]} zoom={6} scrollWheelZoom>
               <TileLayer url={MAPAS_BASE[mapaBaseActual]} attribution="&copy; Google" />
               {!modoGestion && loteActual?.tileUrl && <TileLayer url={loteActual.tileUrl} opacity={0.86} />}
-              {!modoGestion && ambientacion?.tileUrl && <TileLayer url={ambientacion.tileUrl} opacity={opacidadAmbientacion / 100} />}
-              {!modoGestion && ambientacion?.bordesUrl && <TileLayer url={ambientacion.bordesUrl} opacity={0.95} />}
+              {zonasVisibles && ambientacion?.tileUrl && <TileLayer url={ambientacion.tileUrl} opacity={opacidadAmbientacion / 100} />}
+              {zonasVisibles && ambientacion?.bordesUrl && <TileLayer url={ambientacion.bordesUrl} opacity={0.95} />}
               {capasLote.filter((c) => c.visible).map((c) => <TileLayer key={c.id} url={c.tileUrl} opacity={0.92} />)}
               {lotes.filter((l) => !modoGestion || l.id === loteActivoId).map((l) => l.contornos.map((anillo, i) => (
                 <Polygon
@@ -1440,23 +1711,63 @@ export default function App() {
           </div>
 
           <div className="gs-map-top">
-            <div className="gs-map-title">
-              <div className="gs-map-title-main">{loteActual?.nombre || 'Vista general del territorio'}</div>
-              <div className="gs-map-title-sub">
-                {loteActual ? `${formatoHa(loteActual.superficieHa)} ha · ${modoGestion ? 'gestión de lote' : 'espacio de trabajo activo'}` : 'Seleccioná o importá un área para comenzar'}
-              </div>
+            <div className="gs-map-title" ref={selectorRef}>
+              {(() => {
+                const cabecera = (
+                  <>
+                    <span className="gs-lote-trigger-text">
+                      <span className="gs-map-title-main">{loteActual ? etiquetaLote(loteActual) : 'Vista general del territorio'}</span>
+                      <span className="gs-map-title-sub">
+                        {loteActual ? `${formatoHa(loteActual.superficieHa)} ha · ${modoGestion ? 'gestión de lote' : 'espacio de trabajo activo'}` : 'Seleccioná o importá un área para comenzar'}
+                      </span>
+                    </span>
+                    {lotes.length > 1 && <span className="gs-lote-chevron" aria-hidden="true">▾</span>}
+                  </>
+                );
+                return lotes.length > 1 ? (
+                  <button
+                    type="button"
+                    className="gs-lote-trigger"
+                    onClick={() => setSelectorAbierto((v) => !v)}
+                    aria-haspopup="listbox"
+                    aria-expanded={selectorAbierto}
+                    title="Cambiar de lote"
+                  >{cabecera}</button>
+                ) : (
+                  <div className="gs-lote-trigger static">{cabecera}</div>
+                );
+              })()}
+              {selectorAbierto && lotes.length > 1 && (
+                <ul className="gs-lote-list" role="listbox" aria-label="Lotes cargados">
+                  {lotes.map((l) => (
+                    <li key={l.id} role="none">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={l.id === loteActivoId}
+                        className={`gs-lote-option ${l.id === loteActivoId ? 'active' : ''}`}
+                        onClick={() => seleccionarLote(l.id)}
+                      >
+                        <span className="gs-lote-option-text">
+                          <span className="gs-lote-option-name">{etiquetaLote(l)}</span>
+                          <span className="gs-lote-option-meta">{formatoHa(l.superficieHa)} ha · {l.origen}</span>
+                        </span>
+                        {l.id === loteActivoId && <span aria-hidden="true">✓</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {loteActual && !modoGestion && (
-                <>
-                  <div className="gs-capturar">
-                    <button
-                      className="gs-chip-btn primary"
-                      onClick={capturarCapa}
-                      disabled={capturando || !loteActual.tileUrl}
-                      title={loteActual.tileUrl ? 'Guarda la capa visible, recortada al lote' : 'Abrí una capa sobre el lote para poder capturarla'}
-                    >{capturando ? 'Capturando…' : 'Capturar capa'}</button>
-                    <span className="gs-status-item">{loteActual.modoCapa ? `Capa abierta: ${loteActual.modoCapa}` : 'Sin capa abierta'}</span>
-                  </div>
-                </>
+                <div className="gs-capturar">
+                  <button
+                    className="gs-chip-btn primary"
+                    onClick={capturarCapa}
+                    disabled={capturando || !loteActual.tileUrl}
+                    title={loteActual.tileUrl ? 'Guarda la capa visible, recortada al lote' : 'Abrí una capa sobre el lote para poder capturarla'}
+                  >{capturando ? 'Capturando…' : 'Capturar capa'}</button>
+                  <span className="gs-status-item">{loteActual.modoCapa ? `Capa abierta: ${loteActual.modoCapa}` : 'Sin capa abierta'}</span>
+                </div>
               )}
             </div>
             <div className="gs-map-tools">
@@ -1487,7 +1798,9 @@ export default function App() {
             </div>
           )}
 
-          {!modoGestion && loteActual?.vis?.palette && <LeyendaIndice titulo={loteActual.modoCapa} vis={loteActual.vis} />}
+          {!modoGestion && !mostrarCurva && loteActual?.vis?.palette && <LeyendaIndice titulo={loteActual.modoCapa} vis={loteActual.vis} />}
+
+          {mostrarCurva && <PanelCurva {...curvaGrande} onCerrar={() => setCurvaAbierta(false)} />}
 
           <div className="gs-map-bottom">
             <div className="gs-status">
@@ -1704,14 +2017,23 @@ export default function App() {
                       {INDICES.includes(capaAnalisis.modo) ? (
                         <div className="gs-result">
                           <div className="gs-result-title">Curva de evolución del {capaAnalisis.modo}</div>
-                          <div className="gs-note" style={{ marginBottom: 8 }}>Media del lote en cada pasada del período. La línea verde marca la fecha de la capa ({capaAnalisis.fecha}).</div>
+                          <div className="gs-note" style={{ marginBottom: 8 }}>Media del lote en cada pasada del período. El gráfico se abre ampliado sobre el mapa y la línea verde marca la fecha de la capa ({capaAnalisis.fecha}).</div>
                           <div className="gs-grid2">
                             <div className="gs-field"><label htmlFor="c-desde">DESDE</label><input id="c-desde" className="gs-input" type="date" value={curvaDesde} onChange={(e) => setCurvaDesde(e.target.value)} /></div>
                             <div className="gs-field"><label htmlFor="c-hasta">HASTA</label><input id="c-hasta" className="gs-input" type="date" value={curvaHasta} onChange={(e) => setCurvaHasta(e.target.value)} /></div>
                           </div>
                           <button className="gs-primary" onClick={calcularCurvaLote} disabled={cargandoCurva}>{cargandoCurva ? 'Calculando…' : 'Calcular curva de evolución'}</button>
                           {curvaLote?.capaId === capaAnalisis.id && (
-                            <div style={{ marginTop: 12 }}><GraficoSerie puntos={curvaLote.puntos} indice={capaAnalisis.modo} marca={capaAnalisis.fecha} /></div>
+                            <div style={{ marginTop: 10 }}>
+                              <div className="gs-note" style={{ marginTop: 0 }}>
+                                {curvaLote.puntos.length > 0
+                                  ? `${curvaLote.puntos.length} ${curvaLote.puntos.length === 1 ? 'pasada válida' : 'pasadas válidas'} entre ${fechaLarga(curvaLote.desde)} y ${fechaLarga(curvaLote.hasta)}.`
+                                  : 'Sin datos válidos en el período (nubes o sin pasadas). Ampliá las fechas o los sensores.'}
+                              </div>
+                              {!mostrarCurva && (
+                                <button className="gs-secondary" style={{ width: '100%', marginTop: 8 }} onClick={() => setCurvaAbierta(true)}>Ver curva sobre el mapa</button>
+                              )}
+                            </div>
                           )}
                           <div className="gs-note">Usa los sensores y la nubosidad máxima definidos en “Explorar imágenes”.</div>
                         </div>
@@ -1720,74 +2042,84 @@ export default function App() {
                       )}
                     </div>
                   )}
-                </>
-              )}
-            </div>
-          )}
 
-          {seccionActiva === 'zonas' && (
-            <div className="gs-inspector-scroll">
-              {!loteActual ? (
-                <div className="gs-empty"><strong>Seleccioná un área</strong>Las zonas de manejo se calculan dentro del polígono activo.</div>
-              ) : (
-                <>
-                  <div className="gs-section">
-                    <div className="gs-section-head"><span className="gs-section-title">Configuración del análisis</span></div>
-                    <div className="gs-field"><label htmlFor="z-indice">ÍNDICE</label>
-                      <select id="z-indice" className="gs-select" value={indiceAmbientacion} onChange={(e) => setIndiceAmbientacion(e.target.value)}>
-                        {INDICES.map((i) => <option key={i}>{i}</option>)}
-                      </select>
-                    </div>
-                    <div className="gs-grid2">
-                      <div className="gs-field"><label htmlFor="z-clases">CLASES</label>
-                        <select id="z-clases" className="gs-select" value={clasesAmbientacion} onChange={(e) => setClasesAmbientacion(Number(e.target.value))}>
-                          {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-                        </select>
-                      </div>
-                      <div className="gs-field"><label htmlFor="z-metodo">MÉTODO</label>
-                        <select id="z-metodo" className="gs-select" value={metodoZonas} onChange={(e) => setMetodoZonas(e.target.value)}>
-                          <option value="cuantiles">Cuantiles</option>
-                          <option value="intervalos">Intervalos</option>
-                        </select>
-                      </div>
-                    </div>
-                    <div className="gs-field"><label htmlFor="z-sup">SUPERFICIE MÍNIMA (m²)</label>
-                      <input id="z-sup" className="gs-input" type="number" min="0" value={superficieMinM2} onChange={(e) => setSuperficieMinM2(e.target.value)} />
-                    </div>
-                    {!escenaActual && <div className="gs-note">Primero elegí una escena en “Explorar imágenes”.</div>}
-                  </div>
-                  <button className="gs-primary" onClick={ejecutarAmbientacion} disabled={cargando}>{cargando ? 'Procesando zonas…' : 'Generar zonas de manejo'}</button>
-
-                  {ambientacion && (
-                    <div className="gs-result">
-                      <div className="gs-section-head"><span className="gs-section-title">Resultado · {ambientacion.indice}</span><span className="gs-pill ok">Listo</span></div>
-                      <div className="gs-kpis">
-                        <div className="gs-kpi"><div className="gs-kpi-label">Superficie</div><div className="gs-kpi-value">{formatoHa(ambientacion.areaTotalHa)} <small>ha</small></div></div>
-                        <div className="gs-kpi"><div className="gs-kpi-label">Zonas</div><div className="gs-kpi-value">{ambientacion.zonas.length}</div></div>
-                      </div>
-                      <div style={{ marginTop: 10 }}>
-                        {ambientacion.zonas.map((z) => (
-                          <div className="gs-zona" key={z.zona}>
-                            <span className="gs-zona-sw" style={{ background: z.color }} />
-                            <span>{z.etiqueta} <span className="gs-zona-rango">{z.rango}</span></span>
-                            <span>{formatoHa(z.ha)} ha</span>
-                            <strong>{z.porcentaje}%</strong>
+                  <div className="gs-section gs-section-zonas">
+                    <button type="button" className="gs-section-toggle" onClick={() => setZonasAbiertas((v) => !v)} aria-expanded={zonasAbiertas}>
+                      <span className="gs-section-title">Zonas de manejo</span>
+                      <span className="gs-section-note">
+                        {ambientacion ? `${ambientacion.zonas.length} zonas · ${ambientacion.indice}` : 'Sin generar'}
+                        <span aria-hidden="true"> {zonasAbiertas ? '▴' : '▾'}</span>
+                      </span>
+                    </button>
+                    {zonasAbiertas && (
+                      <>
+                        <div className="gs-note" style={{ marginTop: 0, marginBottom: 10 }}>
+                          {!escenaActual
+                            ? 'Primero elegí una escena en “Explorar imágenes”: las zonas se calculan sobre la escena abierta.'
+                            : escenaActual.esDem
+                              ? 'Está abierto el terreno (DEM). Elegí una escena satelital en “Explorar imágenes” para calcular zonas.'
+                              : `Escena base: ${escenaActual.fecha || 's/f'} · ${escenaActual.satelite || familiaDe(escenaActual)}`}
+                        </div>
+                        <div className="gs-field"><label htmlFor="z-indice">ÍNDICE</label>
+                          <select id="z-indice" className="gs-select" value={indiceAmbientacion} onChange={(e) => setIndiceAmbientacion(e.target.value)}>
+                            {INDICES.map((i) => <option key={i}>{i}</option>)}
+                          </select>
+                        </div>
+                        <div className="gs-grid2">
+                          <div className="gs-field"><label htmlFor="z-clases">CLASES</label>
+                            <select id="z-clases" className="gs-select" value={clasesAmbientacion} onChange={(e) => setClasesAmbientacion(Number(e.target.value))}>
+                              {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                            </select>
                           </div>
-                        ))}
-                      </div>
-                      {ambientacion.areaSinDatoHa > 0 && <div className="gs-note">Sin dato (nubes o sombras): {formatoHa(ambientacion.areaSinDatoHa)} ha</div>}
-                      <div className="gs-field" style={{ marginTop: 12, marginBottom: 0 }}>
-                        <label htmlFor="z-opac">OPACIDAD DE LA CAPA</label>
-                        <div className="gs-slider-row"><input id="z-opac" type="range" min="10" max="100" value={opacidadAmbientacion} onChange={(e) => setOpacidadAmbientacion(Number(e.target.value))} /><span className="gs-pill">{opacidadAmbientacion}%</span></div>
-                      </div>
-                      <div className="gs-btn-row">
-                        {['geojson', 'shp', 'gpkg'].map((f) => (
-                          <button key={f} className="gs-secondary" onClick={() => descargarVectorZonas(f)} disabled={exportando}>{f.toUpperCase()}</button>
-                        ))}
-                      </div>
-                      <div className="gs-btn-row"><button className="gs-secondary" onClick={restablecerAmbientacion}>Restablecer</button></div>
-                    </div>
-                  )}
+                          <div className="gs-field"><label htmlFor="z-metodo">MÉTODO</label>
+                            <select id="z-metodo" className="gs-select" value={metodoZonas} onChange={(e) => setMetodoZonas(e.target.value)}>
+                              <option value="cuantiles">Cuantiles</option>
+                              <option value="intervalos">Intervalos</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="gs-field"><label htmlFor="z-sup">SUPERFICIE MÍNIMA (m²)</label>
+                          <input id="z-sup" className="gs-input" type="number" min="0" value={superficieMinM2} onChange={(e) => setSuperficieMinM2(e.target.value)} />
+                        </div>
+                        <button className="gs-primary" onClick={ejecutarAmbientacion} disabled={cargando}>{cargando ? 'Procesando…' : 'Generar zonas de manejo'}</button>
+
+                        {ambientacion && (
+                          <div className="gs-result">
+                            <div className="gs-section-head"><span className="gs-section-title">Resultado · {ambientacion.indice}</span><span className="gs-pill ok">Listo</span></div>
+                            {ambientacion.escena?.fecha && <div className="gs-note" style={{ marginTop: 0, marginBottom: 8 }}>Escena: {ambientacion.escena.fecha} · {ambientacion.escena.satelite}</div>}
+                            <div className="gs-kpis">
+                              <div className="gs-kpi"><div className="gs-kpi-label">Superficie</div><div className="gs-kpi-value">{formatoHa(ambientacion.areaTotalHa)} <small>ha</small></div></div>
+                              <div className="gs-kpi"><div className="gs-kpi-label">Zonas</div><div className="gs-kpi-value">{ambientacion.zonas.length}</div></div>
+                            </div>
+                            <div style={{ marginTop: 10 }}>
+                              {ambientacion.zonas.map((z) => (
+                                <div className="gs-zona" key={z.zona}>
+                                  <span className="gs-zona-sw" style={{ background: z.color }} />
+                                  <span>{z.etiqueta} <span className="gs-zona-rango">{z.rango}</span></span>
+                                  <span>{formatoHa(z.ha)} ha</span>
+                                  <strong>{z.porcentaje}%</strong>
+                                </div>
+                              ))}
+                            </div>
+                            {ambientacion.areaSinDatoHa > 0 && <div className="gs-note">Sin dato (nubes o sombras): {formatoHa(ambientacion.areaSinDatoHa)} ha</div>}
+                            <label className="gs-check" style={{ marginTop: 12 }}>
+                              <input type="checkbox" checked={zonasVisibles} onChange={toggleVisibleZonas} /> Mostrar zonas en el mapa
+                            </label>
+                            <div className="gs-field" style={{ marginTop: 10, marginBottom: 0 }}>
+                              <label htmlFor="z-opac">OPACIDAD DE LA CAPA</label>
+                              <div className="gs-slider-row"><input id="z-opac" type="range" min="10" max="100" value={opacidadAmbientacion} onChange={(e) => setOpacidadAmbientacion(Number(e.target.value))} /><span className="gs-pill">{opacidadAmbientacion}%</span></div>
+                            </div>
+                            <div className="gs-btn-row">
+                              {['geojson', 'shp', 'gpkg'].map((f) => (
+                                <button key={f} className="gs-secondary" onClick={() => descargarVectorZonas(f)} disabled={exportando}>{f.toUpperCase()}</button>
+                              ))}
+                            </div>
+                            <div className="gs-btn-row"><button className="gs-secondary" onClick={restablecerAmbientacion}>Restablecer</button></div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </>
               )}
             </div>
@@ -1814,7 +2146,13 @@ export default function App() {
               ) : !serieTendencia ? (
                 <div className="gs-empty"><strong>Sin serie temporal</strong>Hacé clic en un punto del mapa para consultar la evolución del índice.</div>
               ) : (
-                <div className="gs-result"><GraficoSerie puntos={serieTendencia} indice={indiceTendencia} /></div>
+                <div className="gs-result" style={{ marginTop: 0 }}>
+                  <div className="gs-result-title">{indiceTendencia} · {serieTendencia.length} {serieTendencia.length === 1 ? 'pasada' : 'pasadas'}</div>
+                  <div className="gs-note">El gráfico detallado se muestra sobre el mapa. Hacé clic en otro punto para actualizarlo.</div>
+                  {!mostrarCurva && (
+                    <button className="gs-secondary" style={{ width: '100%', marginTop: 8 }} onClick={() => setCurvaAbierta(true)}>Ver gráfico sobre el mapa</button>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -1830,7 +2168,7 @@ export default function App() {
                     <div className="gs-area-row">
                       <div className="gs-area-icon"><IconAreas /></div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="gs-area-name">{l.nombre}</div>
+                        <div className="gs-area-name">{etiquetaLote(l)}</div>
                         <div className="gs-area-meta">{formatoHa(l.superficieHa)} ha · {l.origen}</div>
                       </div>
                       <button className="gs-icon-btn" onClick={(e) => eliminarLote(l.id, e)} aria-label={`Quitar ${l.nombre}`}>×</button>
