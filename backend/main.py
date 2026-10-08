@@ -4,7 +4,6 @@ import io
 import json
 import math
 import os
-import re
 import tempfile
 import time
 import urllib.request
@@ -22,6 +21,12 @@ from pydantic import BaseModel, Field
 # --------------------------------------------------------------------------
 # Configuración (todo se puede sobreescribir con variables de entorno)
 # --------------------------------------------------------------------------
+try:  # opcional: carga el .env (junto a main.py) antes de leer cualquier variable
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 PROJECT_ID = os.getenv("EE_PROJECT", "project-113b6d7e-674b-4a18-81e")
 CORS_ORIGINS = os.getenv(
     "CORS_ORIGINS",
@@ -62,11 +67,11 @@ LANDSAT_COLS = {"L8_T1": "LANDSAT/LC08/C02/T1_L2", "L9_T1": "LANDSAT/LC09/C02/T1
 S2_NOMBRES = ["B2", "B3", "B4", "B8", "B11", "B12"]
 LANDSAT_SR = ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
 
-S2_BANDAS_VALIDAS = {"B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"}
-LANDSAT_BANDAS = {
-    "B1": "SR_B1", "B2": "SR_B2", "B3": "SR_B3", "B4": "SR_B4",
-    "B5": "SR_B5", "B6": "SR_B6", "B7": "SR_B7", "B10": "ST_B10",
-}
+# Modelo digital de elevación SRTM (30 m). Se trata como una "escena" más: escena_id = SRTM_ID.
+SRTM_ID = "USGS/SRTMGL1_003"
+DEM_MODOS = ("Elevación", "Pendiente", "Sombreado")
+PALETA_RELIEVE = ["006837", "78c679", "ffffcc", "d9a066", "8c510a", "ffffff"]
+PALETA_PENDIENTE = ["ffffcc", "fed976", "fd8d3c", "e31a1c", "800026"]
 
 INDICES = ("NDVI", "NDWI", "SAVI", "NBR")
 IndiceZonas = Literal["NDVI", "NDWI", "SAVI", "NBR"]
@@ -97,7 +102,14 @@ class BuscarEscenasRequest(BaseModel):
 class ObtenerCapaRequest(BaseModel):
     escena_id: str
     modo_viz: str
-    geojson: Optional[dict] = None
+    geojson: Optional[dict] = None  # obligatorio para el DEM (se recorta al lote)
+    enmascarar_nubes: bool = True
+
+
+class CapturarCapaRequest(BaseModel):
+    escena_id: str
+    modo_viz: str
+    geojson: dict
     enmascarar_nubes: bool = True
 
 
@@ -107,12 +119,6 @@ class DescargarRasterRequest(BaseModel):
     geojson: dict
     formato: Literal["geotiff", "png"] = "geotiff"
     enmascarar_nubes: bool = True
-
-
-class DescargarBandasRequest(BaseModel):
-    escena_id: str
-    bandas: List[str] = Field(..., min_length=1)
-    geojson: dict
 
 
 class ZonasRequest(BaseModel):
@@ -137,15 +143,22 @@ class IdentificarPixelRequest(BaseModel):
     enmascarar_nubes: bool = True
 
 
-class SerieTemporalRequest(BaseModel):
-    lat: float = Field(..., ge=-90, le=90)
-    lng: float = Field(..., ge=-180, le=180)
+class SerieBase(BaseModel):
     indice: IndiceZonas = "NDVI"
     fecha_inicio: str
     fecha_fin: str
     sensores: List[str] = ["S2A_L2A", "S2B_L2A"]
     nubosidad_max: float = Field(30, ge=0, le=100)
     enmascarar_nubes: bool = True
+
+
+class SerieTemporalRequest(SerieBase):
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
+
+
+class SerieLoteRequest(SerieBase):
+    geojson: dict
 
 
 # --------------------------------------------------------------------------
@@ -204,7 +217,7 @@ def _es_landsat(escena_id: str) -> bool:
 
 
 def _escala(escena_id: str) -> int:
-    return 30 if _es_landsat(escena_id) else 10
+    return 30 if _es_landsat(escena_id) or escena_id == SRTM_ID else 10
 
 
 def _mascara_s2(img):
@@ -250,8 +263,63 @@ def _indice(base, modo: str):
     return base.select(combinaciones.get(modo, ["B4", "B3", "B2"]))
 
 
+def _dem(modo: str):
+    elev = ee.Image(SRTM_ID).select("elevation")
+    if modo == "Pendiente":
+        return ee.Terrain.slope(elev).rename("pendiente")
+    if modo == "Sombreado":
+        return ee.Terrain.hillshade(elev).rename("sombreado")
+    return elev.rename("elevacion")
+
+
+def _banda_estadisticas(modo: str) -> Optional[str]:
+    """Nombre de la banda sobre la que tiene sentido calcular media/mín/máx (None en composiciones)."""
+    if modo in INDICES:
+        return modo
+    return {"Elevación": "elevacion", "Pendiente": "pendiente"}.get(modo)
+
+
+def _estadisticas(img, modo: str, geom, escala: int) -> Optional[dict]:
+    banda = _banda_estadisticas(modo)
+    if not banda:
+        return None
+    reductor = ee.Reducer.mean().combine(ee.Reducer.minMax(), sharedInputs=True)
+    r = img.select(banda).reduceRegion(reductor, geom, escala, maxPixels=1e9, bestEffort=True).getInfo() or {}
+    if r.get(f"{banda}_mean") is None:
+        return None
+    return {"media": round(r[f"{banda}_mean"], 3), "min": round(r[f"{banda}_min"], 3),
+            "max": round(r[f"{banda}_max"], 3)}
+
+
+def _capa_dem(modo: str, geom, recortar: bool = True):
+    """DEM con rango de colores por percentiles 2-98.
+
+    recortar=True  -> recortado al lote y rango calculado sobre el lote (captura / descarga).
+    recortar=False -> escena completa (visualización); el rango se calcula sobre el lote más
+                      un entorno de 10 km para que el relieve de alrededor también se lea bien.
+    """
+    modo = modo if modo in DEM_MODOS else "Elevación"
+    img = _dem(modo)
+    if recortar:
+        img = img.clip(geom)
+    if modo == "Sombreado":
+        return img, {"min": 0, "max": 255}
+    banda = _banda_estadisticas(modo)
+    region = geom if recortar else geom.bounds(100).buffer(10000)
+    p = img.reduceRegion(ee.Reducer.percentile([2, 98]), region, 30, maxPixels=1e9, bestEffort=True).getInfo() or {}
+    lo, hi = p.get(f"{banda}_p2"), p.get(f"{banda}_p98")
+    if lo is None or hi is None:
+        raise ValueError("No hay datos de elevación SRTM para este lote.")
+    if hi - lo < 1:
+        hi = lo + 1
+    paleta = PALETA_PENDIENTE if modo == "Pendiente" else PALETA_RELIEVE
+    return img, {"min": round(lo, 1), "max": round(hi, 1), "palette": paleta}
+
+
 def _procesar(escena_id: str, modo: str, enmascarar: bool = True):
     """Máscara de nubes solo en índices; en composiciones se quieren ver las nubes."""
+    if escena_id == SRTM_ID:
+        return _dem(modo)
     usar_mascara = enmascarar and modo in INDICES
     return _indice(_base(ee.Image(escena_id), _es_landsat(escena_id), usar_mascara), modo)
 
@@ -262,27 +330,6 @@ def _vis_params(modo: str) -> dict:
     if modo == "NDWI":
         return {"min": -1.0, "max": 1.0, "palette": PALETA_AGUA}
     return {"min": 0, "max": 3000}
-
-
-def _imagen_bandas(escena_id: str, bandas: List[str]):
-    if _es_landsat(escena_id):
-        img = ee.Image(escena_id)
-        salida = []
-        for b in bandas:
-            nombre = LANDSAT_BANDAS.get(b)
-            if not nombre:
-                raise ValueError(f"Banda no válida para Landsat: {b}")
-            if nombre.startswith("SR_"):
-                banda = img.select(nombre).multiply(0.0000275).add(-0.2).multiply(10000)
-            else:  # térmica en Kelvin
-                banda = img.select(nombre).multiply(0.00341802).add(149.0)
-            salida.append(banda.rename(b))
-        return ee.Image.cat(salida).toFloat()
-    nombres = [re.sub(r"^B0(\d)$", r"B\1", b) for b in bandas]
-    for n in nombres:
-        if n not in S2_BANDAS_VALIDAS:
-            raise ValueError(f"Banda no válida para Sentinel-2: {n}")
-    return ee.Image(escena_id).select(nombres).rename(bandas).toFloat()
 
 
 def _escala_segura(geom, escala_base: float, n_bandas: int, limite_bytes: float = 30e6) -> int:
@@ -381,8 +428,13 @@ def _obtener_capa_sync(req: ObtenerCapaRequest):
     cacheado = _cache_get(clave, ttl=7200)
     if cacheado:
         return cacheado
-    vis = _vis_params(req.modo_viz)
-    img = _procesar(req.escena_id, req.modo_viz, req.enmascarar_nubes)
+    if req.escena_id == SRTM_ID:
+        if not req.geojson:
+            raise ValueError("Elegí un lote para ver el DEM.")
+        img, vis = _capa_dem(req.modo_viz, _geometria(req.geojson), recortar=False)
+    else:
+        vis = _vis_params(req.modo_viz)
+        img = _procesar(req.escena_id, req.modo_viz, req.enmascarar_nubes)
     map_id = img.getMapId(vis)
     resultado = {"tile_url": map_id["tile_fetcher"].url_format, "vis": vis}
     _cache_set(clave, resultado)
@@ -392,6 +444,29 @@ def _obtener_capa_sync(req: ObtenerCapaRequest):
 @app.post("/api/obtener-capa")
 async def obtener_capa(req: ObtenerCapaRequest):
     return await _ejecutar(_obtener_capa_sync, req)
+
+
+def _recortada(escena_id: str, modo: str, enmascarar: bool, geom):
+    """Capa recortada por el límite del lote + parámetros de visualización."""
+    if escena_id == SRTM_ID:
+        return _capa_dem(modo, geom)
+    return _procesar(escena_id, modo, enmascarar).clip(geom), _vis_params(modo)
+
+
+def _capturar_capa_sync(req: CapturarCapaRequest):
+    geom = _geometria(req.geojson)
+    img, vis = _recortada(req.escena_id, req.modo_viz, req.enmascarar_nubes, geom)
+    map_id = img.getMapId(vis)
+    return {
+        "tile_url": map_id["tile_fetcher"].url_format,
+        "vis": vis,
+        "stats": _estadisticas(img, req.modo_viz, geom, _escala(req.escena_id)),
+    }
+
+
+@app.post("/api/capturar-capa")
+async def capturar_capa(req: CapturarCapaRequest):
+    return await _ejecutar(_capturar_capa_sync, req)
 
 
 # --------------------------------------------------------------------------
@@ -457,7 +532,7 @@ def _clusterizar_sync(req: ZonasRequest):
                             geometry=geom, scale=escala, maxPixels=1e9, bestEffort=True)
               .getInfo().get("groups", []))
     m2_por_zona = {int(g["zona"]): g["sum"] for g in grupos}
-    clasificado = sum(m2_por_zona.values()) or 1.0
+    clasificado = sum(m2_por_zona.values())
 
     area_total_m2 = geom.area(1).getInfo()
     zonas = []
@@ -466,7 +541,7 @@ def _clusterizar_sync(req: ZonasRequest):
         zonas.append({
             "zona": i + 1, "etiqueta": f"Zona {i + 1}", "color": paleta[i],
             "rango": _rango(i, n, cortes),
-            "porcentaje": round(m2 / clasificado * 100, 1),
+            "porcentaje": round(m2 / (clasificado or 1.0) * 100, 1),
             "m2": round(m2), "ha": round(m2 / 1e4, 2), "km2": round(m2 / 1e6, 3),
         })
 
@@ -528,15 +603,14 @@ async def descargar_vector_ambientacion(req: DescargarVectorRequest):
 # --------------------------------------------------------------------------
 def _descargar_raster_sync(req: DescargarRasterRequest):
     geom = _geometria(req.geojson)
-    img = _procesar(req.escena_id, req.modo_viz, req.enmascarar_nubes).clip(geom)
+    img, vis = _recortada(req.escena_id, req.modo_viz, req.enmascarar_nubes, geom)
     nombre = f"{req.modo_viz}".replace("/", "-").replace(" ", "_")
 
     if req.formato == "png":
-        vis = _vis_params(req.modo_viz)
         url = img.getThumbURL({**vis, "region": geom, "dimensions": 2048, "format": "png"})
         return _bajar(url), "image/png", "png", None
 
-    n_bandas = 1 if req.modo_viz in INDICES else 3
+    n_bandas = 1 if req.modo_viz in INDICES or req.escena_id == SRTM_ID else 3
     escala = _escala_segura(geom, _escala(req.escena_id), n_bandas)
     url = img.toFloat().getDownloadURL({
         "name": nombre, "scale": escala, "crs": "EPSG:4326", "region": geom, "format": "GEO_TIFF",
@@ -551,25 +625,6 @@ async def descargar_raster(req: DescargarRasterRequest):
     if escala:
         headers["X-Escala-Usada"] = str(escala)
     return Response(contenido, media_type=mime, headers=headers)
-
-
-def _descargar_bandas_sync(req: DescargarBandasRequest):
-    geom = _geometria(req.geojson)
-    img = _imagen_bandas(req.escena_id, req.bandas).clip(geom)
-    escala = _escala_segura(geom, _escala(req.escena_id), len(req.bandas))
-    url = img.getDownloadURL({
-        "name": "bandas", "scale": escala, "crs": "EPSG:4326", "region": geom,
-        "format": "ZIPPED_GEO_TIFF", "filePerBand": True,
-    })
-    return _bajar(url), escala
-
-
-@app.post("/api/descargar-escena-bandas")
-async def descargar_escena_bandas(req: DescargarBandasRequest):
-    contenido, escala = await _ejecutar(_descargar_bandas_sync, req)
-    return Response(contenido, media_type="application/zip",
-                    headers={"Content-Disposition": 'attachment; filename="bandas.zip"',
-                             "X-Escala-Usada": str(escala)})
 
 
 # --------------------------------------------------------------------------
@@ -589,32 +644,34 @@ async def identificar_pixel(req: IdentificarPixelRequest):
     return await _ejecutar(_identificar_pixel_sync, req)
 
 
-def _serie_coleccion(col, landsat: bool, punto, req: SerieTemporalRequest, escala: int, etiqueta: str):
+def _serie_coleccion(col, landsat: bool, geom, req: SerieBase, escala: int, etiqueta: str, reductor):
     def extraer(img):
         idx = _indice(_base(img, landsat, req.enmascarar_nubes), req.indice)
-        m = idx.reduceRegion(ee.Reducer.first(), punto, escala)
+        m = idx.reduceRegion(reductor, geom, escala, maxPixels=1e9, bestEffort=True)
         return ee.Feature(None, {"fecha": img.date().format("YYYY-MM-dd"),
                                  "valor": m.get(req.indice), "sat": etiqueta})
-    return col.map(extraer).getInfo()["features"]
+    return ee.FeatureCollection(col.map(extraer)).getInfo()["features"]
 
 
-def _serie_temporal_sync(req: SerieTemporalRequest):
-    punto = ee.Geometry.Point([req.lng, req.lat])
+def _serie(geom, req: SerieBase, reductor):
+    """Serie del índice sobre una geometría: valor del píxel (punto) o media del lote (polígono)."""
     activos = set(req.sensores)
     feats = []
 
-    if activos & set(S2_SPACECRAFT):
-        col = (ee.ImageCollection(S2_COL).filterBounds(punto)
+    nombres_s2 = [S2_SPACECRAFT[s] for s in activos if s in S2_SPACECRAFT]
+    if nombres_s2:
+        col = (ee.ImageCollection(S2_COL).filterBounds(geom)
                .filterDate(req.fecha_inicio, req.fecha_fin)
-               .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", req.nubosidad_max)))
-        feats += _serie_coleccion(col, False, punto, req, 10, "Sentinel-2")
+               .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", req.nubosidad_max))
+               .filter(ee.Filter.inList("SPACECRAFT_NAME", nombres_s2)))
+        feats += _serie_coleccion(col, False, geom, req, 10, "Sentinel-2", reductor)
 
     for clave, col_id in LANDSAT_COLS.items():
         if clave in activos:
-            col = (ee.ImageCollection(col_id).filterBounds(punto)
+            col = (ee.ImageCollection(col_id).filterBounds(geom)
                    .filterDate(req.fecha_inicio, req.fecha_fin)
                    .filter(ee.Filter.lt("CLOUD_COVER", req.nubosidad_max)))
-            feats += _serie_coleccion(col, True, punto, req, 30, "Landsat")
+            feats += _serie_coleccion(col, True, geom, req, 30, "Landsat", reductor)
 
     vistos, puntos = set(), []
     for f in sorted(feats, key=lambda x: x["properties"]["fecha"]):
@@ -627,9 +684,23 @@ def _serie_temporal_sync(req: SerieTemporalRequest):
     return {"puntos": puntos}
 
 
+def _serie_temporal_sync(req: SerieTemporalRequest):
+    return _serie(ee.Geometry.Point([req.lng, req.lat]), req, ee.Reducer.first())
+
+
+def _serie_lote_sync(req: SerieLoteRequest):
+    return _serie(_geometria(req.geojson), req, ee.Reducer.mean())
+
+
 @app.post("/api/serie-temporal-pixel")
 async def serie_temporal_pixel(req: SerieTemporalRequest):
     return await _ejecutar(_serie_temporal_sync, req)
+
+
+@app.post("/api/serie-temporal-lote")
+async def serie_temporal_lote(req: SerieLoteRequest):
+    """Curva de evolución del índice: media del lote en cada pasada del período."""
+    return await _ejecutar(_serie_lote_sync, req)
 
 
 @app.get("/api/salud")
