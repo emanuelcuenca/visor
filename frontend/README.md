@@ -1,16 +1,38 @@
-# React + Vite
+# AgroVisor — frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Frontend basado en React 19, Vite y React-Leaflet.
 
-Currently, two official plugins are available:
+## Desarrollo
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+npm run dev
+```
 
-## React Compiler
+## Configuración de API
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Copiar `.env.example` a `.env` y configurar `VITE_API_URL` para apuntar al backend.
 
-## Expanding the Oxlint configuration
+El selector de organización → establecimiento → lote → campaña está preparado para integrarse mediante endpoints configurables:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+- `VITE_API_ORGANIZATIONS`
+- `VITE_API_ESTABLISHMENTS` (puede incluir `:parentId`)
+- `VITE_API_LOTS` (puede incluir `:parentId`)
+- `VITE_API_CAMPAIGNS` (puede incluir `:parentId`)
+
+Las rutas de la jerarquía son opcionales. No se crean organizaciones, lotes ni campañas ficticios cuando el backend todavía no provee esos datos.
+
+## Estructura
+
+- `src/App.jsx`: entrada y proveedor de selección global.
+- `src/app/context/SelectionContext.jsx`: selección jerárquica global.
+- `src/features/workspace/WorkspaceCore.jsx`: interfaz actual del espacio de trabajo y lógica existente del mapa.
+- `src/features/organizations/components/AgroSelectorTopbar.jsx`: selectores jerárquicos.
+- `src/features/lots/components/LotUploader.jsx`: entrada de importación de áreas vectoriales.
+- `src/features/satellite/components/SatelliteControl.jsx`: control reutilizable de índice y fechas.
+- `src/features/classification/components/ClassificationPanel.jsx`: selector de los cinco métodos de clasificación.
+- `src/features/dem/components/DemPanel.jsx`: selector de productos DEM.
+- `src/services/api.js` y `src/services/endpoints/`: configuración de acceso al backend.
+- `src/utils/geometry.js`: utilidades GeoJSON/BBOX para ajustar la vista del mapa.
+
+Los módulos de satélite, clasificación y DEM son componentes reutilizables preparados para la extracción progresiva de los paneles actuales; la lógica operativa existente se conserva en `WorkspaceCore.jsx` para evitar una reescritura que altere el comportamiento cartográfico.

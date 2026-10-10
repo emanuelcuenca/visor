@@ -53,6 +53,9 @@ from descargas import router as descargas_router  # noqa: E402
 
 app.include_router(descargas_router)
 
+from jerarquia import router as jerarquia_router
+app.include_router(jerarquia_router, prefix="/api")
+
 executor = ThreadPoolExecutor(max_workers=10)
 executor_thumbs = ThreadPoolExecutor(max_workers=8)  # separado para no bloquear al principal
 

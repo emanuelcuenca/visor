@@ -1,0 +1,25 @@
+/* Componentes nuevos de arquitectura; la interfaz principal conserva sus estilos originales. */
+.agro-selector-topbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 640px;
+}
+.agro-selector-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 0; }
+.agro-selector-field > span { color: var(--muted, #8b95a5); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.agro-selector-field select, .feature-control select, .feature-control input {
+  width: 100%; min-width: 0; height: 29px; padding: 0 7px; border-radius: 6px;
+  border: 1px solid var(--border, #232d3f); background: var(--surface-2, #0e1218);
+  color: var(--text, #f3f4f6); font: inherit; font-size: 11px;
+}
+.agro-selector-field select:disabled { opacity: .55; cursor: not-allowed; }
+.feature-control { display: grid; gap: 10px; }
+.feature-control > label, .feature-control-dates > label { display: grid; gap: 5px; font-size: 11px; }
+.feature-control-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 1180px) { .agro-selector-topbar { display: none; } }
+.feature-loading { padding: 10px 12px; color: var(--muted, #8b95a5); font-size: 11px; }
+.feature-chart-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; list-style: none; padding: 0; margin: 0; }
+.feature-chart-legend li { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted, #8b95a5); }
+.feature-chart-legend li span { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }

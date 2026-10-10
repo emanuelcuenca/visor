@@ -1,0 +1,37 @@
+.gx-save-backdrop { position: fixed; inset: 0; z-index: 3000; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.72); }
+.gx-save { --sv-bg:#111111; --sv-2:#171717; --sv-3:#1f1f1f; --sv-line:#2a2a2a; --sv-text:#ededed; --sv-mut:#a1a1a1; --sv-ac:#5fd39a; --sv-ink:#06130d;
+  width: min(560px, 100%); max-height: 92vh; display: flex; flex-direction: column; background: var(--sv-bg); color: var(--sv-text); border: 1px solid var(--sv-line); border-radius: 14px; font: 14px/1.45 'IBM Plex Sans', system-ui, sans-serif; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+.gx-save header { padding: 20px 24px 12px; border-bottom: 1px solid var(--sv-line); }
+.gx-save h2 { margin: 0 0 4px; font-size: 19px; font-weight: 600; }
+.gx-save header p { margin: 0; color: var(--sv-mut); font-size: 13px; }
+.gx-save-body { padding: 16px 24px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+.gx-save-lvl { display: flex; flex-direction: column; gap: 6px; }
+.gx-save-lvl > label, .gx-save-lvl > span.gx-lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--sv-mut); }
+.gx-save select, .gx-save input { height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--sv-line); background: var(--sv-2); color: var(--sv-text); font: inherit; }
+.gx-save select:disabled { opacity: .5; }
+.gx-save select:focus-visible, .gx-save input:focus-visible, .gx-save button:focus-visible { outline: 2px solid var(--sv-ac); outline-offset: 2px; }
+.gx-save-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.gx-save-auto { display: flex; gap: 8px; flex-wrap: wrap; }
+.gx-save-auto span { padding: 4px 10px; border: 1px solid var(--sv-line); border-radius: 20px; color: var(--sv-mut); font-size: 12px; background: var(--sv-2); }
+.gx-save-missing { color: #f5c26b; font-size: 13px; }
+.gx-save-error { padding: 12px; border-radius: 8px; background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35); color: #fca5a5; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.gx-save footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 24px 20px; border-top: 1px solid var(--sv-line); }
+.gx-save-btn { height: 40px; padding: 0 18px; border-radius: 8px; border: 1px solid var(--sv-line); background: var(--sv-2); color: var(--sv-text); font: inherit; font-weight: 600; cursor: pointer; }
+.gx-save-btn.primary { background: var(--sv-ac); border-color: var(--sv-ac); color: var(--sv-ink); }
+.gx-save-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Insignia "Sin guardar" (se usa fuera del diálogo, por eso con colores propios) */
+.gx-badge { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 20px; background: rgba(245,194,107,.16); color: #f5c26b; font-size: 10px; font-weight: 600; letter-spacing: .02em; vertical-align: middle; }
+.gx-unsaved-banner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; border: 1px solid rgba(245,194,107,.35); border-radius: 8px; background: rgba(245,194,107,.08); font-size: 12px; }
+.gx-unsaved-banner .gx-badge { margin-left: 0; }
+.gx-unsaved-btn { margin-left: auto; height: 30px; padding: 0 12px; border-radius: 7px; border: 0; background: #5fd39a; color: #06130d; font: inherit; font-weight: 600; cursor: pointer; }
+.gx-unsaved-btn:focus-visible { outline: 2px solid #5fd39a; outline-offset: 2px; }
+.gx-save-feedback { padding: 0 24px 12px; }
+.gx-save-error small { opacity: .8; font-family: 'IBM Plex Mono', monospace; font-size: 11px; word-break: break-all; }
+.gx-prompt { position: fixed; top: 84px; left: 50%; transform: translateX(-50%); z-index: 2500; display: flex; align-items: center; gap: 20px; max-width: calc(100vw - 32px); padding: 14px 16px 14px 18px; background: #111111; color: #ededed; border: 1px solid #2a2a2a; border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.55); font: 14px/1.4 'IBM Plex Sans', system-ui, sans-serif; }
+.gx-prompt > div:first-child { display: flex; flex-direction: column; gap: 2px; }
+.gx-prompt span { color: #a1a1a1; font-size: 12px; }
+.gx-prompt-actions { display: flex; gap: 8px; flex: none; }
+.gx-prompt-btn { height: 38px; padding: 0 16px; border-radius: 8px; border: 1px solid #2a2a2a; background: #171717; color: #ededed; font: inherit; font-weight: 600; cursor: pointer; }
+.gx-prompt-btn.primary { background: #5fd39a; border-color: #5fd39a; color: #06130d; }
+.gx-prompt-btn:focus-visible { outline: 2px solid #5fd39a; outline-offset: 2px; }
