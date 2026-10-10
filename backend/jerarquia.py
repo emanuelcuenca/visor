@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import re
 from contextlib import contextmanager
 from typing import Any, Optional
 
@@ -24,6 +25,9 @@ def db():
     finally:
         con.close()
 
+def _agregar_columna(con, tabla, columna, tipo):
+    if columna not in [r["name"] for r in con.execute(f"PRAGMA table_info({tabla})")]:
+        con.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
 
 def init_db():
     with db() as con:
@@ -51,6 +55,8 @@ def init_db():
             ciclo TEXT NOT NULL,
             UNIQUE (lote_id, cultivo, ciclo));
         """)
+        _agregar_columna(con, "lotes", "cultivo", "TEXT")
+        _agregar_columna(con, "lotes", "campania", "TEXT")
 
 
 init_db()
@@ -72,7 +78,8 @@ class LoteIn(BaseModel):
     origen: Optional[str] = None
     superficie_ha: Optional[float] = None
     geojson: dict[str, Any]
-    campania: CampaniaIn
+    cultivo: str = Field(min_length=1, max_length=80)
+    campania: str = Field(min_length=9, max_length=9)
 
 
 def _insertar(con, sql, params, detalle_duplicado):
@@ -140,16 +147,15 @@ def listar_campanias(lote_id: int):
 
 @router.get("/lotes")
 def listar_lotes():
-    """Todos los lotes guardados, con su geometría. Se usa al abrir la aplicación."""
     import json
     with db() as con:
         filas = con.execute("""
-            SELECT l.id, l.nombre, l.origen, l.superficie_ha, l.geojson,
+            SELECT l.id, l.nombre, l.origen, l.superficie_ha, l.geojson, l.cultivo, l.campania,
                    e.id AS est_id, e.nombre AS est_nombre, o.id AS org_id, o.nombre AS org_nombre
             FROM lotes l JOIN establecimientos e ON e.id = l.establecimiento_id
             JOIN organizaciones o ON o.id = e.organizacion_id ORDER BY l.creado DESC""").fetchall()
     return [{"id": f["id"], "nombre": f["nombre"], "origen": f["origen"], "superficie_ha": f["superficie_ha"],
-             "geojson": json.loads(f["geojson"]),
+             "cultivo": f["cultivo"], "campania": f["campania"], "geojson": json.loads(f["geojson"]),
              "establecimiento": {"id": f["est_id"], "nombre": f["est_nombre"]},
              "organizacion": {"id": f["org_id"], "nombre": f["org_nombre"]}} for f in filas]
 
@@ -159,19 +165,19 @@ def crear_lote(body: LoteIn):
     import json
     if body.geojson.get("type") not in {"FeatureCollection", "Feature", "Polygon", "MultiPolygon"}:
         raise HTTPException(status_code=422, detail="geojson: tipo de geometría no válido.")
+    if not re.fullmatch(r"\d{4}/\d{4}", body.campania):
+        raise HTTPException(status_code=422, detail="campania: formato esperado AAAA/AAAA (ej.: 2025/2026).")
     nombre = body.nombre.strip()
-    with db() as con:  # una sola transacción: si falla algo, no queda nada a medias
+    cultivo = " ".join(body.cultivo.split()).capitalize()  # primera letra en mayúscula, resto en minúscula
+    with db() as con:
         pertenece = con.execute("SELECT 1 FROM establecimientos WHERE id = ? AND organizacion_id = ?",
                                 (body.establecimiento_id, body.organizacion_id)).fetchone()
         if not pertenece:
             raise HTTPException(status_code=422, detail="El establecimiento no pertenece a la organización indicada.")
-        lid = _insertar(con, "INSERT INTO lotes (establecimiento_id, nombre, origen, superficie_ha, geojson) VALUES (?, ?, ?, ?, ?)",
-                        (body.establecimiento_id, nombre, body.origen, body.superficie_ha, json.dumps(body.geojson)),
+        lid = _insertar(con, "INSERT INTO lotes (establecimiento_id, nombre, origen, superficie_ha, geojson, cultivo, campania) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (body.establecimiento_id, nombre, body.origen, body.superficie_ha, json.dumps(body.geojson), cultivo, body.campania),
                         "No se pudo guardar el lote.")
-        cultivo, ciclo = body.campania.cultivo.strip(), body.campania.ciclo.strip()
-        cid = _insertar(con, "INSERT INTO campanias (lote_id, cultivo, ciclo) VALUES (?, ?, ?)",
-                        (lid, cultivo, ciclo), "Esa campaña ya existe en el lote.")
-    return {"id": lid, "nombre": nombre, "campania": {"id": cid, "nombre": f"{cultivo} {ciclo}"}}
+    return {"id": lid, "nombre": nombre, "cultivo": cultivo, "campania": body.campania}
 
 class LotePatch(BaseModel):
     nombre: str = Field(min_length=1, max_length=200)

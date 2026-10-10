@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { API_BASE_URL } from '../../services/api.js';
-import AgroSelectorTopbar from '../organizations/components/AgroSelectorTopbar.jsx';
 import LotUploader from '../lots/components/LotUploader.jsx';
 import SaveLotDialog from '../lots/components/SaveLotDialog.jsx';
 import FirstLotGate from '../lots/components/FirstLotGate.jsx';
@@ -20,6 +19,8 @@ import JSZip from 'jszip';
 import { kml } from '@tmcw/togeojson';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import ComboFiltro from '../../components/ui/ComboFiltro.jsx';
+import { normalizarTexto, CULTIVOS_BASE } from '../../utils/agro.js';
 
 const MAPAS_BASE = {
   'Google Satélite': 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
@@ -105,6 +106,7 @@ const INFO_SECCION = {
   descargas: { eyebrow: 'Centro de productos', titulo: 'Productos y descargas' }
 };
 const PESTANAS_LOTE = [['capa', 'Capa'], ['ambientes', 'Ambientes'], ['relieve', 'Relieve'], ['exportar', 'Exportar']];
+const FILTRO_VACIO = { org: '', est: '', cultivo: '', campania: '', estado: '' };
 
 // ---------- Íconos ----------
 const Icono = ({ size = 18, children }) => (
@@ -640,7 +642,29 @@ export default function WorkspaceCore() {
   const [editandoId, setEditandoId] = useState(null);
   const [nombreEdicion, setNombreEdicion] = useState('');
   const [confirmarBorrarId, setConfirmarBorrarId] = useState(null);
-  const lotesFiltrados = lotes.filter((l) => (l.nombre || '').toLowerCase().includes(filtroLotes.trim().toLowerCase()));
+  const [filtroJ, setFiltroJ] = useState(FILTRO_VACIO);           // lo que se está eligiendo
+  const [filtroAplicado, setFiltroAplicado] = useState(FILTRO_VACIO); // lo que se aplicó con «Filtrar»
+  const [filtrosAbiertos, setFiltrosAbiertos] = useState(false);
+  const nj = (x) => x?.nombre ?? x?.name ?? '';
+const unicos = (arr) => [...new Set(arr.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es'));
+const incl = (valor, filtro) => !filtro.trim() || normalizarTexto(valor).includes(normalizarTexto(filtro));
+// Cada criterio es independiente: con uno solo alcanza.
+const opcOrg = unicos(lotes.map((l) => nj(l.jerarquia?.org)));
+const opcEst = unicos(lotes.map((l) => nj(l.jerarquia?.est)));
+const opcCultivo = unicos(lotes.map((l) => l.cultivo));
+const opcCamp = unicos(lotes.map((l) => l.campania));
+const cultivosDisponibles = unicos([...CULTIVOS_BASE, ...lotes.map((l) => l.cultivo)]);
+const filtrosActivos = Object.values(filtroAplicado).filter(Boolean).length;
+const hayBorrador = Object.values(filtroJ).some(Boolean) || filtrosActivos > 0;
+const lotesFiltrados = lotes.filter((l) =>
+  incl(l.nombre, filtroLotes)
+  && incl(nj(l.jerarquia?.org), filtroAplicado.org)
+  && incl(nj(l.jerarquia?.est), filtroAplicado.est)
+  && incl(l.cultivo, filtroAplicado.cultivo)
+  && incl(l.campania, filtroAplicado.campania)
+  && (!filtroAplicado.estado || (filtroAplicado.estado === 'guardados' ? l.guardado : !l.guardado)));
+const aplicarFiltros = () => { setFiltroAplicado(filtroJ); setFiltrosAbiertos(false); };
+const limpiarFiltros = () => { setFiltroJ(FILTRO_VACIO); setFiltroAplicado(FILTRO_VACIO); };
   const lotesSinGuardar = lotes.filter((l) => !l.guardado).length;
   const [loteAConfirmarId, setLoteAConfirmarId] = useState(null);
   const [dockAbierto, setDockAbierto] = useState(true);
@@ -662,7 +686,7 @@ export default function WorkspaceCore() {
         const contornos = extraerContornos(geojson);
         return { guardado: true, servidorId: String(l.id), id: String(l.id), nombre: l.nombre, origen: l.origen || 'Guardado', superficieHa: calcularAreaGeoJSONHa(geojson),
           geojson, contornos, puntosCoords: contornos.flat(), escenas: [], buscada: false, escenaSeleccionada: null,
-          tileUrl: null, vis: null, modoCapa: null, ambientacion: null, capas: [], jerarquia: { org: l.organizacion, est: l.establecimiento }};
+          tileUrl: null, vis: null, modoCapa: null, ambientacion: null, capas: [], jerarquia: { org: l.organizacion, est: l.establecimiento }, cultivo: l.cultivo, campania: l.campania};
       });
       setLotes(cargados);
       if (cargados[0]) activarLoteEstado(cargados[0]);
@@ -1695,9 +1719,10 @@ const borrarLote = async (l) => {
   <SaveLotDialog
     key={loteAGuardar.id}
     lote={loteAGuardar}
+    cultivosExistentes={cultivosDisponibles}
     onClose={() => setLoteAGuardarId(null)}
-    onSaved={({ servidorId, nombre, jerarquia }) => {
-      actualizarLote(loteAGuardar.id, { guardado: true, servidorId, nombre, jerarquia });
+    onSaved={({ servidorId, nombre, cultivo, campania, jerarquia }) => {
+      actualizarLote(loteAGuardar.id, { guardado: true, servidorId, nombre, cultivo, campania, jerarquia });
       setLoteAGuardarId(null);
       avisar('Lote guardado en tu cuenta.', 'info');
     }}
@@ -1753,7 +1778,6 @@ const borrarLote = async (l) => {
         </div>
 
         <button className="gs-top-btn" onClick={() => fileInputRef.current?.click()}><IconSubir /> Importar área</button>
-        <AgroSelectorTopbar />
 
         <div className="gs-top-actions">
           <button className="gs-top-btn" onClick={() => irASeccion('descargas')}><IconDescargas /> Descargas{hayDescargasActivas ? ' •' : ''}</button>
@@ -1773,10 +1797,13 @@ const borrarLote = async (l) => {
       <div className="gx-lotecard-meta">{formatoHa(loteActual.superficieHa)} ha · {loteActual.origen}</div>
       {loteActual.jerarquia && (
         <div className="gx-lotecard-path">
-          {[loteActual.jerarquia.org, loteActual.jerarquia.est, loteActual.jerarquia.campania]
+          {[loteActual.jerarquia.org, loteActual.jerarquia.est]
             .filter(Boolean).map((e) => e.nombre ?? e.name).join(' › ')}
         </div>
       )}
+      {(loteActual.cultivo || loteActual.campania) && (
+  <div className="gx-lotecard-path">{[loteActual.cultivo, loteActual.campania].filter(Boolean).join(' · ')}</div>
+)}
       <div className="gx-lotecard-actions">
         <button className="gx-mini" onClick={() => setCentroMapa({ coords: loteActual.puntosCoords, t: Date.now() })}>Centrar</button>
         {loteActual.guardado
@@ -2466,14 +2493,49 @@ const borrarLote = async (l) => {
 
             <div className="gs-section">
               <div className="gs-section-head"><span className="gs-section-title">Mis lotes</span><span className="gs-section-note">{lotesFiltrados.length} de {lotes.length}</span></div>
-              {lotes.length > 1 && (
-                <input className="gs-input" type="search" placeholder="Filtrar por nombre" aria-label="Filtrar lotes por nombre"
-                  value={filtroLotes} onChange={(e) => setFiltroLotes(e.target.value)} style={{ marginBottom: 10 }} />
-              )}
+                   {lotes.length > 0 && (
+        <div className="gx-lotes-tools">
+          <input className="gs-input" type="search" placeholder="Filtrar por nombre" aria-label="Filtrar lotes por nombre"
+            value={filtroLotes} onChange={(e) => setFiltroLotes(e.target.value)} />
+          <button type="button" className={`gx-filter-btn ${filtrosAbiertos || filtrosActivos > 0 ? 'on' : ''}`}
+            title="Filtros por jerarquía" aria-expanded={filtrosAbiertos} aria-controls="gx-filtros"
+            aria-label={`Filtros por jerarquía${filtrosActivos ? `, ${filtrosActivos} activos` : ''}`}
+            onClick={() => setFiltrosAbiertos((v) => !v)}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 7h9M17 7h3" /><circle cx="15" cy="7" r="2" />
+              <path d="M4 12h3M11 12h9" /><circle cx="9" cy="12" r="2" />
+              <path d="M4 17h11M19 17h1" /><circle cx="17" cy="17" r="2" />
+            </svg>
+          </button>
+        </div>
+      )}
+      {filtrosAbiertos && lotes.length > 0 && (
+          <div className="gx-filtros" id="gx-filtros">
+            <ComboFiltro id="fj-org" label="ORGANIZACIÓN / CLIENTE" placeholder="Todas" options={opcOrg}
+              value={filtroJ.org} onChange={(v) => setFiltroJ((f) => ({ ...f, org: v }))} />
+            <ComboFiltro id="fj-est" label="ESTABLECIMIENTO" placeholder="Todos" options={opcEst}
+              value={filtroJ.est} onChange={(v) => setFiltroJ((f) => ({ ...f, est: v }))} />
+            <ComboFiltro id="fj-cult" label="CULTIVO" placeholder="Todos" options={opcCultivo}
+              value={filtroJ.cultivo} onChange={(v) => setFiltroJ((f) => ({ ...f, cultivo: v }))} />
+            <ComboFiltro id="fj-camp" label="CAMPAÑA" placeholder="Todas" options={opcCamp}
+              value={filtroJ.campania} onChange={(v) => setFiltroJ((f) => ({ ...f, campania: v }))} />
+            <div className="gs-field"><label htmlFor="fj-estado">ESTADO</label>
+              <select id="fj-estado" className="gs-select" value={filtroJ.estado} onChange={(e) => setFiltroJ((f) => ({ ...f, estado: e.target.value }))}>
+                <option value="">Todos</option>
+                <option value="guardados">Guardados</option>
+                <option value="singuardar">Sin guardar</option>
+              </select>
+            </div>
+            <div className="gx-filtros-foot">
+              <button className="gx-mini" onClick={limpiarFiltros} disabled={!hayBorrador}>Limpiar</button>
+              <button className="gx-mini primary" onClick={aplicarFiltros}>Filtrar</button>
+            </div>
+          </div>
+        )}
               {lotes.length === 0 ? (
                 <div className="gs-empty"><strong>No hay lotes</strong>Importá un archivo o dibujá un polígono directamente sobre el mapa.</div>
               ) : lotesFiltrados.length === 0 ? (
-                <div className="gs-empty"><strong>Sin resultados</strong>Ningún lote coincide con “{filtroLotes}”.</div>
+                <div className="gs-empty"><strong>Sin resultados</strong>Ningún lote coincide con la búsqueda y los filtros aplicados.</div>
               ) : lotesFiltrados.map((l) => (
                 <div key={l.id} className={`gs-area gx-lote ${l.id === loteActivoId ? 'active' : ''}`}>
                   <div className="gs-area-row">
@@ -2497,9 +2559,10 @@ const borrarLote = async (l) => {
                     {l.guardado ? <span className="gx-badge ok">Guardado</span> : <span className="gx-badge">Sin guardar</span>}
                     {l.jerarquia && (
                       <span className="gx-lote-path">
-                        {[l.jerarquia.org, l.jerarquia.est, l.jerarquia.campania].filter(Boolean).map((x) => x.nombre ?? x.name).join(' › ')}
+                        {[l.jerarquia.org, l.jerarquia.est].filter(Boolean).map((x) => x.nombre ?? x.name).join(' › ')}
                       </span>
                     )}
+                    {(l.cultivo || l.campania) && <span className="gx-lote-path">{[l.cultivo, l.campania].filter(Boolean).join(' · ')}</span>}
                   </div>
                   <div className="gx-lote-actions">
                     {!l.guardado && <button className="gx-mini primary" onClick={() => setLoteAGuardarId(l.id)}>Guardar</button>}
