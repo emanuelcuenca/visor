@@ -97,12 +97,12 @@ const ETIQUETA_ESTADO = {
 const CLAVE_DESCARGAS = 'geosat_descargas_ids';
 
 const INFO_SECCION = {
-  imagenes: { eyebrow: 'Catálogo satelital', titulo: 'Explorar imágenes' },
-  tendencia: { eyebrow: 'Análisis temporal', titulo: 'Tendencia vegetal' },
-  lote: { eyebrow: 'Capas y análisis', titulo: 'Gestión de lote' },
-  areas: { eyebrow: 'Gestión del espacio de trabajo', titulo: 'Mis lotes' },
+  imagenes: { eyebrow: 'Catálogo satelital', titulo: 'Imágenes satelitales' },
+  tendencia: { eyebrow: 'Análisis temporal', titulo: 'Curva de evolución' },
+  lote: { eyebrow: 'Capas, índices y ambientes', titulo: 'Ficha y análisis del lote' },
+  areas: { eyebrow: 'Mis datos', titulo: 'Mis lotes' },
   ia: { eyebrow: 'Inteligencia geoespacial', titulo: 'Soluciones IA' },
-  descargas: { eyebrow: 'Centro de productos', titulo: 'Descargas' }
+  descargas: { eyebrow: 'Centro de productos', titulo: 'Productos y descargas' }
 };
 
 // ---------- Íconos ----------
@@ -200,20 +200,35 @@ const IconRegla = () => (
 const NAV_ESPACIO = {
   agricultura: [
     {
-      titulo: 'Análisis',
+      titulo: 'Lote activo',
       items: [
-        { id: 'imagenes', label: 'Imágenes', Icon: IconImagenes },
-        { id: 'tendencia', label: 'Evolución', Icon: IconTendencia },
-        { id: 'comparar', label: 'Comparar escenas', Icon: IconComparar, pronto: true }
+        { id: 'lote', label: 'Ficha y análisis', Icon: IconLote },
+        { id: 'imagenes', label: 'Imágenes satelitales', Icon: IconImagenes },
+        { id: 'tendencia', label: 'Curva de evolución', Icon: IconTendencia },
+        { id: 'descargas', label: 'Productos y descargas', Icon: IconDescargas }
       ]
     },
     {
-      titulo: 'Proyecto',
+      titulo: 'Agronomía de campo',
       items: [
-        { id: 'lote', label: 'Capas', Icon: IconLote },
+        { id: 'clima', label: 'Clima y balance hídrico', Icon: IconTendencia, pronto: true },
+        { id: 'campo', label: 'Monitoreo a campo', Icon: IconAreas, pronto: true },
+        { id: 'rinde', label: 'Rendimiento y cosecha', Icon: IconLote, pronto: true }
+      ]
+    },
+    {
+      titulo: 'Gestión',
+      items: [
+        { id: 'prescripciones', label: 'Prescripciones', Icon: IconDescargas, pronto: true },
+        { id: 'comparar', label: 'Comparar campañas', Icon: IconComparar, pronto: true },
+        { id: 'informes', label: 'Informes y alertas', Icon: IconIA, pronto: true }
+      ]
+    },
+    {
+      titulo: 'Cuenta',
+      items: [
         { id: 'areas', label: 'Mis lotes', Icon: IconAreas },
-        { id: 'ia', label: 'Soluciones IA', Icon: IconIA },
-        { id: 'descargas', label: 'Descargas', Icon: IconDescargas }
+        { id: 'ia', label: 'Soluciones IA', Icon: IconIA }
       ]
     }
   ]
@@ -638,7 +653,7 @@ export default function WorkspaceCore() {
         const contornos = extraerContornos(geojson);
         return { guardado: true, servidorId: String(l.id), id: String(l.id), nombre: l.nombre, origen: l.origen || 'Guardado', superficieHa: calcularAreaGeoJSONHa(geojson),
           geojson, contornos, puntosCoords: contornos.flat(), escenas: [], buscada: false, escenaSeleccionada: null,
-          tileUrl: null, vis: null, modoCapa: null, ambientacion: null, capas: [] };
+          tileUrl: null, vis: null, modoCapa: null, ambientacion: null, capas: [], jerarquia: { org: l.organizacion, est: l.establecimiento }};
       });
       setLotes(cargados);
       if (cargados[0]) activarLoteEstado(cargados[0]);
@@ -1700,32 +1715,29 @@ export default function WorkspaceCore() {
 
       <div className="gs-body">
         <Sidebar>
-          <div className="gs-workspace">
-            <div className="gs-label" id="gs-ws-label">Espacio de trabajo</div>
-            <div className="gs-ws-tabs" role="tablist" aria-labelledby="gs-ws-label" aria-orientation="vertical">
-              {ESPACIOS.map((esp) => {
-                const activo = esp.id === espacioActivo;
-                return (
-                  <button
-                    key={esp.id}
-                    role="tab"
-                    aria-selected={activo}
-                    disabled={!esp.habilitado}
-                    className={`gs-ws-tab ${activo ? 'active' : ''}`}
-                    onClick={() => setEspacioActivo(esp.id)}
-                  >
-                    <span className="gs-ws-dot" />
-                    <span className="gs-ws-text">
-                      <span className="gs-ws-name">{esp.nombre}</span>
-                      <span className="gs-ws-meta">
-                        {esp.habilitado ? `${lotes.length} ${lotes.length === 1 ? 'espacio' : 'espacios'} de trabajo` : 'Próximamente'}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+<div className="gs-workspace">
+  <div className="gs-label">Lote activo</div>
+  {loteActual ? (
+    <div className="gx-lotecard">
+      <div className="gx-lotecard-name" title={loteActual.nombre}>{loteActual.nombre}</div>
+      <div className="gx-lotecard-meta">{formatoHa(loteActual.superficieHa)} ha · {loteActual.origen}</div>
+      {loteActual.jerarquia && (
+        <div className="gx-lotecard-path">
+          {[loteActual.jerarquia.org, loteActual.jerarquia.est, loteActual.jerarquia.campania]
+            .filter(Boolean).map((e) => e.nombre ?? e.name).join(' › ')}
+        </div>
+      )}
+      <div className="gx-lotecard-actions">
+        <button className="gx-mini" onClick={() => setCentroMapa({ coords: loteActual.puntosCoords, t: Date.now() })}>Centrar</button>
+        {loteActual.guardado
+          ? <span className="gx-badge ok">Guardado</span>
+          : <button className="gx-mini primary" onClick={() => setLoteAGuardarId(loteActual.id)}>Guardar lote</button>}
+      </div>
+    </div>
+  ) : (
+    <div className="gx-lotecard empty">Dibujá o importá un área para comenzar.</div>
+  )}
+</div>
 
           <nav className="gs-nav" aria-label={`Secciones de ${espacioActivo}`}>
             {(NAV_ESPACIO[espacioActivo] || []).map((grupo, gi) => (
@@ -1736,8 +1748,8 @@ export default function WorkspaceCore() {
                   return (
                     <React.Fragment key={id}>
                     <button
-                      disabled={pronto}
-                      title={pronto ? 'Próximamente' : undefined}
+                      disabled={pronto || (!loteActual && id !== 'areas' && id !== 'descargas')}
+                      title={pronto ? 'Próximamente' : (!loteActual && id !== 'areas' && id !== 'descargas') ? 'Primero dibujá o importá un lote' : undefined}
                       className={`gs-nav-item ${seccionActiva === id ? 'active' : ''}`}
                       onClick={() => irASeccion(id)}
                     >
