@@ -29,10 +29,14 @@
 .gx-lotecard-meta { font: 500 12px 'IBM Plex Mono', ui-monospace, monospace; color: var(--muted); }
 .gx-lotecard-path { font-size: 11px; color: var(--muted); }
 .gx-lotecard-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.gx-mini { height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
-.gx-mini.primary { background: var(--accent); border-color: var(--accent); color: #06130d; }
-.gx-mini:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.gx-badge.ok { background: rgba(95,211,154,.16); color: var(--accent); }
+
+/* Botones pequeños: más específicos y con colores de respaldo */
+.gs-app .gx-mini { height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border, #2a2a2a); background: var(--surface, #111111); color: var(--text, #ededed); font: inherit; font-weight: 600; cursor: pointer; }
+.gs-app .gx-mini:hover:not(:disabled) { background: var(--hover, #222222); }
+.gs-app .gx-mini.primary { background: var(--accent, #5fd39a); border-color: var(--accent, #5fd39a); color: #06130d; }
+.gs-app .gx-mini.primary:hover:not(:disabled) { background: var(--accent-hover, #4cc088); }
+.gs-app .gx-mini:focus-visible { outline: 2px solid var(--accent, #5fd39a); outline-offset: 2px; }
+.gs-app .gx-mini:disabled { opacity: .45; cursor: not-allowed; }
 .gs-app.gs-app .gs-primary, .gs-app.gs-app .gs-chip-btn.primary, .gs-app.gs-app .gs-logo { color: var(--gx-ink); }
 .gs-app.gs-app .gs-kpi-value, .gs-app.gs-app .gs-pop-row strong { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 
@@ -82,3 +86,67 @@
 .gs-app.gs-app .gs-top-btn, .gs-app.gs-app .gs-user { flex: none; white-space: nowrap; }
 .gs-app.gs-app .agro-selector-topbar { flex: 1 1 0; min-width: 0; max-width: none; }
 .gx-gate-hint { font-size: 13px; color: var(--muted); }
+
+/* Línea de tiempo de escenas */
+.gx-dock { position: absolute; left: 18px; right: 18px; bottom: 66px; z-index: 600; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--overlay); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+.gx-dock-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gx-dock-title { display: flex; flex-direction: column; min-width: 0; }
+.gx-dock-title strong { font-size: 13px; font-weight: 600; color: var(--text); }
+.gx-dock-title span { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gx-dock-actions { display: flex; gap: 6px; flex: none; }
+.gx-dock-actions .gx-mini:disabled { opacity: .45; cursor: not-allowed; }
+.gx-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
+.gx-strip-empty { color: var(--muted); font-size: 12px; padding: 10px 4px; }
+.gx-scene { flex: 0 0 148px; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-3); }
+.gx-scene.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.gx-scene-main { border: 0; background: transparent; color: inherit; font: inherit; text-align: left; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px 6px; cursor: pointer; border-radius: 9px 9px 0 0; }
+.gx-scene-main:focus-visible, .gx-scene-dl:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gx-scene-date { font: 600 13px 'IBM Plex Mono', ui-monospace, monospace; color: var(--text); }
+.gx-scene-sat { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gx-cloud { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.gx-cloud i { display: block; height: 100%; background: var(--text-2); }
+.gx-scene-cl { font-size: 11px; color: var(--muted); }
+.gx-scene-dl { border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--accent-text); font: inherit; font-size: 11px; font-weight: 600; padding: 5px 10px; text-align: left; cursor: pointer; border-radius: 0 0 9px 9px; }
+.gx-scene-dl:disabled { color: var(--faint); cursor: not-allowed; }
+/* La leyenda del índice sube para no quedar tapada por el dock */
+.gs-app:has(.gx-dock:not(.plegado)) .gs-legend { bottom: 300px; }
+.gs-app:has(.gx-dock.plegado) .gs-legend { bottom: 134px; }
+
+.gs-app .gx-scene-main { padding: 0; gap: 0; overflow: hidden; }
+.gx-thumb { display: block; width: 100%; height: 56px; object-fit: cover; border-radius: 8px 8px 0 0; background: var(--surface); }
+.gx-scene-txt { display: flex; flex-direction: column; gap: 3px; padding: 7px 10px 6px; }
+
+/* Pestañas de la ficha del lote */
+.gs-app .gx-tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex: none; }
+.gs-app .gx-tab { position: relative; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 500; padding: 11px 12px; cursor: pointer; }
+.gs-app .gx-tab:hover { color: var(--text); }
+.gs-app .gx-tab[aria-selected="true"] { color: var(--text); font-weight: 600; }
+.gs-app .gx-tab[aria-selected="true"]::after { content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; background: var(--accent); border-radius: 2px; }
+.gs-app .gx-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+.gx-tab-n { font: 500 10px 'IBM Plex Mono', ui-monospace, monospace; background: var(--surface-3); color: var(--muted); border-radius: 10px; padding: 1px 6px; }
+
+/* Relieve y Exportar */
+.gs-app .gx-relieve-main { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; padding: 0; }
+.gx-relieve-main span { font-size: 11px; color: var(--muted); }
+.gx-relieve-dl { display: flex; gap: 10px; margin-top: 6px; }
+.gx-exp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
+.gx-exp-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gx-exp-row > span:last-child { display: flex; gap: 10px; flex: none; }
+
+/* Mis lotes */
+.gx-resumen { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+.gx-resumen-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 6px; text-align: center; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-3); }
+.gx-resumen-item strong { font: 600 15px 'IBM Plex Mono', ui-monospace, monospace; color: var(--text); }
+.gx-resumen-item span { font-size: 10px; color: var(--muted); }
+.gs-app .gs-area.gx-lote { cursor: default; display: flex; flex-direction: column; gap: 8px; }
+.gs-app .gx-lote-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; padding: 0; cursor: pointer; }
+.gx-lote-main:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.gs-app .gx-lote .gs-area-name { font-size: 13px; }
+.gx-lote-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gx-lote-foot .gx-badge { margin-left: 0; }
+.gx-lote-path { font-size: 11px; color: var(--muted); }
+.gx-lote-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.gs-app .gx-rename { flex: 1; height: 32px; }
+.gx-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid rgba(248,113,113,.35); border-radius: 8px; background: rgba(248,113,113,.08); font-size: 12px; color: #fca5a5; }
+.gx-confirm > span { flex: 1 1 100%; }
+.gs-app .gx-mini.danger { background: #f87171; border-color: #f87171; color: #1a0505; }

@@ -3,7 +3,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 DB_PATH = os.getenv("GEOSAT_DB", "geosat.db")
@@ -172,3 +172,25 @@ def crear_lote(body: LoteIn):
         cid = _insertar(con, "INSERT INTO campanias (lote_id, cultivo, ciclo) VALUES (?, ?, ?)",
                         (lid, cultivo, ciclo), "Esa campaña ya existe en el lote.")
     return {"id": lid, "nombre": nombre, "campania": {"id": cid, "nombre": f"{cultivo} {ciclo}"}}
+
+class LotePatch(BaseModel):
+    nombre: str = Field(min_length=1, max_length=200)
+
+
+@router.patch("/lotes/{lote_id}")
+def renombrar_lote(lote_id: int, body: LotePatch):
+    nombre = body.nombre.strip()
+    if not nombre:
+        raise HTTPException(status_code=422, detail="El nombre no puede estar vacío.")
+    with db() as con:
+        if con.execute("UPDATE lotes SET nombre = ? WHERE id = ?", (nombre, lote_id)).rowcount == 0:
+            raise HTTPException(status_code=404, detail="El lote no existe.")
+    return {"id": lote_id, "nombre": nombre}
+
+
+@router.delete("/lotes/{lote_id}", status_code=204)
+def eliminar_lote(lote_id: int):
+    with db() as con:  # las campañas del lote se borran en cascada
+        if con.execute("DELETE FROM lotes WHERE id = ?", (lote_id,)).rowcount == 0:
+            raise HTTPException(status_code=404, detail="El lote no existe.")
+    return Response(status_code=204)

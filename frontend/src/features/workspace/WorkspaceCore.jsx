@@ -104,6 +104,7 @@ const INFO_SECCION = {
   ia: { eyebrow: 'Inteligencia geoespacial', titulo: 'Soluciones IA' },
   descargas: { eyebrow: 'Centro de productos', titulo: 'Productos y descargas' }
 };
+const PESTANAS_LOTE = [['capa', 'Capa'], ['ambientes', 'Ambientes'], ['relieve', 'Relieve'], ['exportar', 'Exportar']];
 
 // ---------- Íconos ----------
 const Icono = ({ size = 18, children }) => (
@@ -630,11 +631,19 @@ export default function WorkspaceCore() {
 
   const [espacioActivo, setEspacioActivo] = useState('agricultura');
   const [seccionActiva, setSeccionActiva] = useState('imagenes');
+  const [pestanaLote, setPestanaLote] = useState('capa');
 
   const [lotes, setLotes] = useState([]);
   const [loteAGuardarId, setLoteAGuardarId] = useState(null);
   const loteAGuardar = lotes.find((l) => l.id === loteAGuardarId) || null;
+  const [filtroLotes, setFiltroLotes] = useState('');
+  const [editandoId, setEditandoId] = useState(null);
+  const [nombreEdicion, setNombreEdicion] = useState('');
+  const [confirmarBorrarId, setConfirmarBorrarId] = useState(null);
+  const lotesFiltrados = lotes.filter((l) => (l.nombre || '').toLowerCase().includes(filtroLotes.trim().toLowerCase()));
+  const lotesSinGuardar = lotes.filter((l) => !l.guardado).length;
   const [loteAConfirmarId, setLoteAConfirmarId] = useState(null);
+  const [dockAbierto, setDockAbierto] = useState(true);
   const loteAConfirmar = lotes.find((l) => l.id === loteAConfirmarId) || null;
   useEffect(() => {
   if (!loteAConfirmarId) return undefined;
@@ -738,7 +747,7 @@ export default function WorkspaceCore() {
   }, [selectedCampaign]);
   const escenaActual = loteActual?.escenaSeleccionada || null;
   const capasLote = loteActual?.capas || [];
-  const modoGestion = seccionActiva === 'lote' && !!loteActual;
+  const modoGestion = seccionActiva === 'lote' && !!loteActual && pestanaLote !== 'relieve';
   const capaAnalisis = capasLote.find((c) => c.id === capaAnalisisId) || null;
   const capasDisponibles = escenaActual?.esDem ? CAPAS_DEM : CAPAS;
   const ambientacion = loteActual?.ambientacion || null;
@@ -779,6 +788,15 @@ export default function WorkspaceCore() {
 
   const actualizarLote = (id, cambios) =>
     setLotes((prev) => prev.map((l) => (l.id === id ? { ...l, ...cambios } : l)));
+  const descargarContornoGeoJSON = () => {
+  const blob = new Blob([JSON.stringify(loteActual.geojson)], { type: 'application/geo+json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${(loteActual.nombre || 'lote').replace(/[^\w.-]+/g, '_')}.geojson`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
   const avisar = useCallback((texto, tipo = 'error') => {
     setToast({ texto, tipo });
@@ -839,6 +857,38 @@ export default function WorkspaceCore() {
     setLotes(restantes);
     if (loteActivoId === id) activarLoteEstado(restantes[0] || null);
   };
+  const iniciarRenombrar = (l, e) => { e.stopPropagation(); setNombreEdicion(l.nombre); setEditandoId(l.id); };
+
+const confirmarRenombrar = async (l) => {
+  const nombre = nombreEdicion.trim();
+  setEditandoId(null);
+  if (!nombre || nombre === l.nombre) return;
+  const anterior = l.nombre;
+  actualizarLote(l.id, { nombre });
+  if (l.guardado && l.servidorId && AUTH_ENDPOINTS.myLots) {
+    try {
+      await api.patch(`${AUTH_ENDPOINTS.myLots}/${l.servidorId}`, { nombre });
+    } catch (err) {
+      actualizarLote(l.id, { nombre: anterior });
+      avisar(await mensajeError(err, 'No se pudo renombrar el lote en tu cuenta'));
+    }
+  }
+};
+
+const borrarLote = async (l) => {
+  setConfirmarBorrarId(null);
+  if (l.guardado && l.servidorId && AUTH_ENDPOINTS.myLots) {
+    try {
+      await api.delete(`${AUTH_ENDPOINTS.myLots}/${l.servidorId}`);
+    } catch (err) {
+      avisar(await mensajeError(err, 'No se pudo eliminar el lote de tu cuenta'));
+      return;
+    }
+  }
+  const restantes = lotes.filter((x) => x.id !== l.id);
+  setLotes(restantes);
+  if (loteActivoId === l.id) activarLoteEstado(restantes[0] || null);
+};
 
   const nombreLoteNuevo = () => {
     const usados = new Set(lotes.map((l) => l.nombre));
@@ -1102,7 +1152,7 @@ export default function WorkspaceCore() {
 
   const calcularCurvaLote = async () => {
     if (!capaAnalisis || !INDICES.includes(capaAnalisis.modo)) return;
-    if (sensoresActivos.length === 0) { avisar('Activá al menos un sensor en Explorar imágenes.', 'info'); return; }
+    if (sensoresActivos.length === 0) { avisar('Activá al menos un sensor en Imágenes satelitales.', 'info'); return; }
     if (!curvaDesde || !curvaHasta || curvaDesde > curvaHasta) { avisar('Revisá el período de la curva: “Desde” debe ser anterior a “Hasta”.', 'info'); return; }
     const capaId = capaAnalisis.id;
     const desde = curvaDesde;
@@ -1924,6 +1974,64 @@ export default function WorkspaceCore() {
           {!modoGestion && !mostrarCurva && loteActual?.vis?.palette && <LeyendaIndice titulo={loteActual.modoCapa} vis={loteActual.vis} />}
 
           {mostrarCurva && <PanelCurva {...curvaGrande} onCerrar={() => setCurvaAbierta(false)} />}
+            {loteActual && !modoGestion && !mostrarCurva && !modoDibujar && (() => {
+  const ordenadas = [...loteActual.escenas].sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+  const idx = ordenadas.findIndex((e) => e.id === escenaActual?.id);
+  const ir = (d) => { const e = ordenadas[idx + d]; if (e) seleccionarEscena(e); };
+  return (
+    <section className={`gx-dock ${dockAbierto ? '' : 'plegado'}`} aria-label="Línea de tiempo de escenas">
+      <header className="gx-dock-head">
+        <div className="gx-dock-title">
+          <strong>Línea de tiempo</strong>
+          <span>{ordenadas.length} {ordenadas.length === 1 ? 'escena' : 'escenas'} · {fechaInicio} → {fechaFin} · hasta {nubosidadMax}% de nubes</span>
+        </div>
+        <div className="gx-dock-actions">
+          <button className="gx-mini" onClick={() => ir(-1)} disabled={idx <= 0} aria-label="Escena anterior">‹</button>
+          <button className="gx-mini" onClick={() => ir(1)} disabled={ordenadas.length === 0 || idx >= ordenadas.length - 1} aria-label="Escena siguiente">›</button>
+          <button className="gx-mini primary" onClick={buscarEscenas} disabled={cargando}>{cargando ? 'Buscando…' : 'Buscar escenas'}</button>
+          <button className="gx-mini" onClick={() => setDockAbierto((v) => !v)} aria-expanded={dockAbierto}>{dockAbierto ? 'Ocultar' : 'Mostrar'}</button>
+        </div>
+      </header>
+      {dockAbierto && (
+        <div className="gx-strip" role="list">
+          {ordenadas.length === 0 ? (
+            <div className="gx-strip-empty">
+              {loteActual.buscada
+                ? 'Sin escenas para esos filtros. Probá ampliando las fechas, la nubosidad o los sensores.'
+                : 'Ejecutá una búsqueda para ver las pasadas del satélite sobre este lote.'}
+            </div>
+          ) : ordenadas.map((e) => {
+            const activa = escenaActual?.id === e.id;
+            const landsat = familiaDe(e) === 'Landsat';
+            return (
+              <div key={e.id} role="listitem" className={`gx-scene ${activa ? 'on' : ''}`}
+                ref={activa ? (el) => el?.scrollIntoView({ block: 'nearest', inline: 'center' }) : undefined}>
+                <button type="button" className="gx-scene-main" aria-pressed={activa} onClick={() => seleccionarEscena(e)}>
+                    <img
+                    className="gx-thumb"
+                    src={e.thumb || placeholderSvg(`${familiaDe(e)} · ${e.fecha || ''}`)}
+                    alt=""
+                    loading="lazy"
+                    onError={(ev) => { ev.currentTarget.onerror = null; ev.currentTarget.src = placeholderSvg(`${familiaDe(e)} · ${e.fecha || ''}`); }}
+                  />
+                  <span className="gx-scene-txt">
+                    <span className="gx-scene-date">{e.fecha || '—'}</span>
+                    <span className="gx-scene-sat">{e.satelite || familiaDe(e)}</span>
+                    <span className="gx-cloud" aria-hidden="true"><i style={{ width: `${Math.min(100, Number(e.nubosidad) || 0)}%` }} /></span>
+                    <span className="gx-scene-cl">Nubes {e.nubosidad ?? '—'}%</span>
+                  </span>
+                </button>
+                <button type="button" className="gx-scene-dl" disabled={landsat}
+                  title={landsat ? 'La descarga de Landsat todavía no está disponible' : undefined}
+                  onClick={(ev) => abrirModalDescargaEscena(e, ev)}>Descargar</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+})()}
 
           <div className="gs-map-bottom">
             <div className="gs-status">
@@ -2010,42 +2118,15 @@ export default function WorkspaceCore() {
                   )}
 
                   <div className="gs-section" style={{ marginTop: 18 }}>
-                    <div className="gs-section-head"><span className="gs-section-title">Resultados</span><span className="gs-section-note">{loteActual.escenas.length} escenas</span></div>
-                    {loteActual.escenas.length === 0 ? (
-                      <div className="gs-empty">
-                        <strong>{loteActual.buscada ? 'Sin escenas para esos filtros' : 'No hay escenas cargadas'}</strong>
-                        {loteActual.buscada ? 'Probá ampliando las fechas, la nubosidad o los sensores.' : 'Ejecutá una búsqueda para consultar el catálogo satelital.'}
-                      </div>
-                    ) : loteActual.escenas.map((e) => {
-                      const activa = escenaActual?.id === e.id;
-                      return (
-                        <div key={e.id} className={`gs-scene ${activa ? 'active' : ''}`} onClick={() => seleccionarEscena(e)}>
-                          <div className="gs-scene-top">
-                            <div className="gs-scene-thumb">
-                              <img src={e.thumb || placeholderSvg(`${familiaDe(e)} · ${e.fecha || ''}`)} alt="" loading="lazy" />
-                            </div>
-                            <div className="gs-scene-info">
-                              <div className="gs-scene-date">{e.fecha || 'Fecha no disponible'}</div>
-                              <div className="gs-scene-sat">{e.satelite || familiaDe(e)}</div>
-                              <div className="gs-scene-meta">
-                                <span className="gs-scene-chip">Nubes {e.nubosidad ?? '—'}%</span>
-                                {e.tile && <span className="gs-scene-chip">{e.tile}</span>}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="gs-scene-footer">
-                            <span className="gs-scene-status">{activa ? '✓ Visualización activa' : 'Seleccionar escena'}</span>
-                            <button
-                              className="gs-link"
-                              disabled={familiaDe(e) === 'Landsat'}
-                              title={familiaDe(e) === 'Landsat' ? 'La descarga de Landsat todavía no está disponible' : undefined}
-                              onClick={(ev) => abrirModalDescargaEscena(e, ev)}
-                            >Descargar</button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                    <div className="gs-section-head"><span className="gs-section-title">Escenas</span><span className="gs-section-note">{loteActual.escenas.length} encontradas</span></div>
+                    <div className="gs-note">
+                      {loteActual.escenas.length
+                       ? 'Elegí la escena en la línea de tiempo, debajo del mapa.'
+                        : loteActual.buscada
+                        ? 'Sin escenas para esos filtros. Probá ampliando fechas, nubosidad o sensores.'
+                        : 'Ejecutá una búsqueda para consultar el catálogo satelital.'}
+                     </div>
+                    </div>
 
                   <div className="gs-section">
                     <div className="gs-section-head"><span className="gs-section-title">Terreno · DEM SRTM</span><span className="gs-section-note">30 m</span></div>
@@ -2084,20 +2165,27 @@ export default function WorkspaceCore() {
           )}
 
           {seccionActiva === 'lote' && (
-            <div className="gs-inspector-scroll">
+            <>
+            {loteActual && (
+              <div className="gx-tabs" role="tablist" aria-label="Secciones de la ficha del lote">
+                {PESTANAS_LOTE.map(([id, nombre]) => (
+                  <button key={id} type="button" role="tab" id={`gx-tab-${id}`} aria-selected={pestanaLote === id} className="gx-tab" onClick={() => setPestanaLote(id)}>
+                    {nombre}
+                    {id === 'capa' && capasLote.length > 0 && <span className="gx-tab-n">{capasLote.length}</span>}
+                    {id === 'ambientes' && ambientacion && <span className="gx-tab-n">{ambientacion.zonas.length}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="gs-inspector-scroll" role="tabpanel" aria-labelledby={`gx-tab-${pestanaLote}`}>
               {!loteActual ? (
                 <div className="gs-empty"><strong>Seleccioná un lote</strong>Dibujá o importá un área para gestionar sus capas.</div>
               ) : (
                 <>
+              {pestanaLote === 'capa' && (
+                <>
                   <div className="gs-section">
                     <div className="gs-section-head"><span className="gs-section-title">Datos del lote</span></div>
-                    {!loteActual.guardado && (
-                    <div className="gx-unsaved-banner" role="status">
-                      <span className="gx-badge">Sin guardar</span>
-                      <span>Este lote todavía no está en tu cuenta.</span>
-                     <button className="gx-unsaved-btn" onClick={() => setLoteAGuardarId(loteActual.id)}>Guardar lote</button>
-                  </div>
-)}
                     <div className="gs-field"><label htmlFor="l-nombre">NOMBRE</label>
                       <input id="l-nombre" className="gs-input" value={loteActual.nombre} onChange={(e) => actualizarLote(loteActual.id, { nombre: e.target.value })} />
                     </div>
@@ -2113,7 +2201,7 @@ export default function WorkspaceCore() {
                       <span className="gs-section-note">{capasLote.length} en el lote</span>
                     </div>
                     {capasLote.length === 0 ? (
-                      <div className="gs-empty"><strong>Todavía no capturaste capas</strong>Abrí una capa sobre el lote en “Explorar imágenes” y usá “Capturar capa”.</div>
+                      <div className="gs-empty"><strong>Todavía no capturaste capas</strong>Abrí una capa sobre el lote en “Imágenes satelitales” y usá “Capturar capa”.</div>
                     ) : (
                       <>
                         {capasLote.map((c) => (
@@ -2165,14 +2253,16 @@ export default function WorkspaceCore() {
                               )}
                             </div>
                           )}
-                          <div className="gs-note">Usa los sensores y la nubosidad máxima definidos en “Explorar imágenes”.</div>
+                          <div className="gs-note">Usa los sensores y la nubosidad máxima definidos en “Imágenes satelitales”.</div>
                         </div>
                       ) : (
                         <div className="gs-note">Para esta capa no hay análisis temporales disponibles por ahora.</div>
                       )}
                     </div>
                   )}
-
+                </>
+              )}
+              {pestanaLote === 'ambientes' && (
                   <div className="gs-section gs-section-zonas">
                     <button type="button" className="gs-section-toggle" onClick={() => setZonasAbiertas((v) => !v)} aria-expanded={zonasAbiertas}>
                       <span className="gs-section-title">Zonas de manejo</span>
@@ -2185,9 +2275,9 @@ export default function WorkspaceCore() {
                       <>
                         <div className="gs-note" style={{ marginTop: 0, marginBottom: 10 }}>
                           {!escenaActual
-                            ? 'Primero elegí una escena en “Explorar imágenes”: las zonas se calculan sobre la escena abierta.'
+                            ? 'Primero elegí una escena en “Imágenes satelitales”: las zonas se calculan sobre la escena abierta.'
                             : escenaActual.esDem
-                              ? 'Está abierto el terreno (DEM). Elegí una escena satelital en “Explorar imágenes” para calcular zonas.'
+                              ? 'Está abierto el terreno (DEM). Elegí una escena satelital en “Imágenes satelitales” para calcular zonas.'
                               : `Escena base: ${escenaActual.fecha || 's/f'} · ${escenaActual.satelite || familiaDe(escenaActual)}`}
                         </div>
                         <div className="gs-field"><label htmlFor="z-indice">ÍNDICE</label>
@@ -2268,10 +2358,70 @@ export default function WorkspaceCore() {
                       </>
                     )}
                   </div>
+              )}
+              {pestanaLote === 'relieve' && (
+                <div className="gs-section">
+                  <div className="gs-section-head"><span className="gs-section-title">Relieve · DEM SRTM</span><span className="gs-section-note">30 m</span></div>
+                  <div className="gs-note" style={{ marginTop: 0, marginBottom: 10 }}>Se visualiza completo sobre el mapa; al descargar o capturar se recorta al límite del lote.</div>
+                  {['Elevación', 'Pendiente', 'Sombreado'].map((m) => {
+                    const activo = !!escenaActual?.esDem && loteActual.modoCapa === m;
+                    return (
+                      <div className={`gs-scene ${activo ? 'active' : ''}`} key={m}>
+                        <button type="button" className="gx-relieve-main" aria-pressed={activo} onClick={() => seleccionarEscena(ESCENA_SRTM, m)}>
+                          <strong>{m}</strong>
+                          <span>{activo ? '✓ Visualización activa' : 'Ver sobre el lote'}</span>
+                        </button>
+                        <span className="gx-relieve-dl">
+                          {['geotiff', 'png'].map((f) => (
+                            <button key={f} className="gs-link" disabled={exportando} onClick={() => descargarRaster(f, { escenaId: SRTM_ID, modo: m })}>{f === 'geotiff' ? 'GeoTIFF' : 'PNG'}</button>
+                          ))}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <div className="gs-note">Para guardar el relieve como capa del lote usá “Capturar capa” sobre el mapa.</div>
+                </div>
+              )}
+              {pestanaLote === 'exportar' && (
+                <>
+                  <div className="gs-section">
+                    <div className="gs-section-head"><span className="gs-section-title">Capas del lote</span><span className="gs-section-note">{capasLote.length}</span></div>
+                    {capasLote.length === 0 ? (
+                      <div className="gs-empty"><strong>Sin capas capturadas</strong>Capturá una capa desde “Imágenes satelitales” para exportarla acá.</div>
+                    ) : capasLote.map((c) => (
+                      <div className="gx-exp-row" key={c.id}>
+                        <span title={c.nombre}>{c.nombre}</span>
+                        <span>
+                          {['geotiff', 'png'].map((f) => (
+                            <button key={f} className="gs-link" disabled={exportando} onClick={() => descargarRaster(f, { escenaId: c.escenaId, modo: c.modo })}>{f === 'geotiff' ? 'GeoTIFF' : 'PNG'}</button>
+                          ))}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="gs-section">
+                    <div className="gs-section-head"><span className="gs-section-title">Zonas de manejo</span><span className="gs-section-note">{ambientacion ? `${ambientacion.zonas.length} zonas` : 'Sin generar'}</span></div>
+                    {ambientacion ? (
+                      <div className="gs-btn-row">
+                        {['geojson', 'shp', 'gpkg'].map((f) => (
+                          <button key={f} className="gs-secondary" onClick={() => descargarVectorZonas(f)} disabled={exportando}>{f.toUpperCase()}</button>
+                        ))}
+                      </div>
+                    ) : <div className="gs-note">Generá las zonas en la pestaña Ambientes para exportarlas.</div>}
+                  </div>
+                  <div className="gs-section">
+                    <div className="gs-section-head"><span className="gs-section-title">Contorno del lote</span></div>
+                    <div className="gs-btn-row"><button className="gs-secondary" onClick={descargarContornoGeoJSON}>GEOJSON</button></div>
+                  </div>
+                  <button className="gs-secondary" style={{ width: '100%' }} onClick={() => irASeccion('descargas')}>Abrir centro de descargas</button>
+                </>
+              )}
                 </>
               )}
             </div>
+            </>
           )}
+
 
           {seccionActiva === 'tendencia' && (
             <div className="gs-inspector-scroll">
@@ -2306,27 +2456,74 @@ export default function WorkspaceCore() {
           )}
 
           {seccionActiva === 'areas' && (
-            <div className="gs-inspector-scroll">
-              <div className="gs-section">
-                <div className="gs-section-head"><span className="gs-section-title">Espacios de trabajo</span><span className="gs-section-note">{lotes.length} total</span></div>
-                {lotes.length === 0 ? (
-                  <div className="gs-empty"><strong>No hay áreas</strong>Importá un archivo o dibujá un polígono directamente sobre el mapa.</div>
-                ) : lotes.map((l) => (
-                  <div key={l.id} className={`gs-area ${l.id === loteActivoId ? 'active' : ''}`} onClick={() => seleccionarLote(l.id)}>
-                    <div className="gs-area-row">
-                      <div className="gs-area-icon"><IconAreas /></div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="gs-area-name">{etiquetaLote(l)}</div>
-                        <div className="gs-area-meta">{formatoHa(l.superficieHa)} ha · {l.origen}{!l.guardado && <span className="gx-badge">Sin guardar</span>}</div>
-                      </div>
-                      <button className="gs-icon-btn" onClick={(e) => eliminarLote(l.id, e)} aria-label={`Quitar ${l.nombre}`}>×</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <button className="gs-secondary" style={{ width: '100%' }} onClick={() => activarHerramienta('dibujar')}>＋ Nueva área en el mapa</button>
+          <div className="gs-inspector-scroll">
+            <div className="gx-resumen">
+              <div className="gx-resumen-item"><strong>{lotes.length}</strong><span>Lotes</span></div>
+              <div className="gx-resumen-item"><strong>{lotes.length - lotesSinGuardar}</strong><span>Guardados</span></div>
+              <div className="gx-resumen-item"><strong>{lotesSinGuardar}</strong><span>Sin guardar</span></div>
+              <div className="gx-resumen-item"><strong>{formatoHa(lotes.reduce((a, l) => a + (l.superficieHa || 0), 0))}</strong><span>ha totales</span></div>
             </div>
-          )}
+
+            <div className="gs-section">
+              <div className="gs-section-head"><span className="gs-section-title">Mis lotes</span><span className="gs-section-note">{lotesFiltrados.length} de {lotes.length}</span></div>
+              {lotes.length > 1 && (
+                <input className="gs-input" type="search" placeholder="Filtrar por nombre" aria-label="Filtrar lotes por nombre"
+                  value={filtroLotes} onChange={(e) => setFiltroLotes(e.target.value)} style={{ marginBottom: 10 }} />
+              )}
+              {lotes.length === 0 ? (
+                <div className="gs-empty"><strong>No hay lotes</strong>Importá un archivo o dibujá un polígono directamente sobre el mapa.</div>
+              ) : lotesFiltrados.length === 0 ? (
+                <div className="gs-empty"><strong>Sin resultados</strong>Ningún lote coincide con “{filtroLotes}”.</div>
+              ) : lotesFiltrados.map((l) => (
+                <div key={l.id} className={`gs-area gx-lote ${l.id === loteActivoId ? 'active' : ''}`}>
+                  <div className="gs-area-row">
+                    <div className="gs-area-icon"><IconAreas /></div>
+                    {editandoId === l.id ? (
+                      <input className="gs-input gx-rename" autoFocus value={nombreEdicion} aria-label="Nuevo nombre del lote"
+                        onChange={(e) => setNombreEdicion(e.target.value)}
+                        onBlur={() => confirmarRenombrar(l)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') e.currentTarget.blur();
+                          if (e.key === 'Escape') { setNombreEdicion(l.nombre); e.currentTarget.blur(); }
+                        }} />
+                    ) : (
+                      <button type="button" className="gx-lote-main" onClick={() => seleccionarLote(l.id)} aria-current={l.id === loteActivoId ? 'true' : undefined}>
+                        <span className="gs-area-name">{etiquetaLote(l)}</span>
+                        <span className="gs-area-meta">{formatoHa(l.superficieHa)} ha · {l.origen}</span>
+                      </button>
+                    )}
+                  </div>
+                  <div className="gx-lote-foot">
+                    {l.guardado ? <span className="gx-badge ok">Guardado</span> : <span className="gx-badge">Sin guardar</span>}
+                    {l.jerarquia && (
+                      <span className="gx-lote-path">
+                        {[l.jerarquia.org, l.jerarquia.est, l.jerarquia.campania].filter(Boolean).map((x) => x.nombre ?? x.name).join(' › ')}
+                      </span>
+                    )}
+                  </div>
+                  <div className="gx-lote-actions">
+                    {!l.guardado && <button className="gx-mini primary" onClick={() => setLoteAGuardarId(l.id)}>Guardar</button>}
+                    <button className="gx-mini" onClick={() => seleccionarLote(l.id)}>Ver</button>
+                    <button className="gx-mini" onClick={(e) => iniciarRenombrar(l, e)}>Renombrar</button>
+                    <button className="gx-mini" onClick={() => setConfirmarBorrarId(l.id)}>Eliminar</button>
+                  </div>
+                  {confirmarBorrarId === l.id && (
+                    <div className="gx-confirm" role="alertdialog" aria-label={`Confirmar eliminación de ${l.nombre}`}>
+                      <span>{l.guardado ? 'Se eliminará también de tu cuenta.' : 'Todavía no está guardado: se va a perder.'}</span>
+                      <button className="gx-mini" onClick={() => setConfirmarBorrarId(null)}>Cancelar</button>
+                      <button className="gx-mini danger" onClick={() => borrarLote(l)}>Eliminar</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="gs-btn-row">
+              <button className="gs-secondary" onClick={() => activarHerramienta('dibujar')}>＋ Dibujar lote</button>
+              <button className="gs-secondary" onClick={() => fileInputRef.current?.click()}>Importar archivo</button>
+            </div>
+          </div>
+        )}
 
           {seccionActiva === 'descargas' && (
             <div className="gs-inspector-scroll">
