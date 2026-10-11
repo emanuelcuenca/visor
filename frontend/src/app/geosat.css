@@ -179,3 +179,15 @@
 .gx-combo-empty { padding: 8px 9px; font-size: 12px; color: var(--muted, #a1a1a1); }
 .gx-hint { margin: -4px 0 10px; font-size: 11px; color: var(--muted, #a1a1a1); }
 .gx-filtros-foot { gap: 8px; }
+
+.gx-title-path { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); }
+.gs-app .gx-prompt { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 700; flex-direction: column; align-items: stretch; gap: 12px; width: min(320px, calc(100% - 32px)); padding: 16px; text-align: center; }
+.gs-app .gx-prompt > div:first-child { align-items: center; }
+.gs-app .gx-prompt-actions { justify-content: center; }
+
+.gx-curva-label { background: transparent; border: 0; box-shadow: none; color: #ffd27a; font: 600 10px 'IBM Plex Mono', ui-monospace, monospace; text-shadow: 0 0 3px #000, 0 0 3px #000; }
+.leaflet-tooltip.gx-curva-label::before { display: none; }
+.gx-exp-capa { padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
+.gx-exp-nombre { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gx-exp-opcion { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 11px; color: var(--muted); }
+.gx-exp-opcion > span:last-child { display: flex; gap: 10px; flex: none; }

@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from curvas import router as curvas_router
+
 # --------------------------------------------------------------------------
 # Configuración (todo se puede sobreescribir con variables de entorno)
 # --------------------------------------------------------------------------
@@ -48,6 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition", "X-Escala-Usada"],
 )
+app.include_router(curvas_router, prefix="/api")
 
 from descargas import router as descargas_router  # noqa: E402
 

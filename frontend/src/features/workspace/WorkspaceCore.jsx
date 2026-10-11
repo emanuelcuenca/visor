@@ -8,11 +8,11 @@ import { useAuth } from '../../app/context/AuthContext.jsx';
 import { api, getListPayload } from '../../services/api.js';
 import { AUTH_ENDPOINTS } from '../../services/endpoints/auth.js';
 import { geometryBbox, bboxToLeafletBounds } from '../../utils/geometry.js';
+import { MapContainer, TileLayer, GeoJSON, useMapEvents, useMap, Polygon, Polyline, CircleMarker, Popup } from 'react-leaflet';
 import Topbar from '../../components/layout/Topbar.jsx';
 import Sidebar from '../../components/layout/Sidebar.jsx';
 import MapView from '../../components/map/MapView.jsx';
 import FloatingPanel from '../../components/layout/FloatingPanel.jsx';
-import { MapContainer, TileLayer, useMapEvents, useMap, Polygon, Polyline, CircleMarker, Popup } from 'react-leaflet';
 import axios from 'axios';
 import shp from 'shpjs';
 import JSZip from 'jszip';
@@ -51,6 +51,7 @@ const CAPAS_DEM = [
   { id: 'Sombreado', nombre: 'Sombreado (relieve)' }
 ];
 const MODOS_DEM = CAPAS_DEM.map((c) => c.id);
+const PALETA_CURVAS = ['#006837', '#78c679', '#ffffcc', '#d9a066', '#8c510a', '#ffffff'];
 
 // Bandas del producto Sentinel-2 L2A que se pueden pedir en la descarga
 const BANDAS_S2 = [
@@ -83,12 +84,6 @@ const ESTRUCTURA_SENSORES = [
   }
 ];
 const TODOS_LOS_SENSORES = ESTRUCTURA_SENSORES.flatMap((f) => f.sensores.map((s) => s.id));
-
-// Espacios de trabajo (pestañas del panel izquierdo). Por ahora solo Agricultura está habilitada.
-const ESPACIOS = [
-  { id: 'agricultura', nombre: 'Agricultura', habilitado: true },
-  { id: 'paisaje', nombre: 'Paisaje', habilitado: false }
-];
 
 const ESTADOS_ACTIVOS = ['en_cola', 'buscando', 'descargando'];
 const ETIQUETA_ESTADO = {
@@ -322,6 +317,19 @@ const familiaDe = (escena) =>
 
 const colorPaleta = (c) => (c.startsWith('#') ? c : `#${c}`);
 
+const colorCurva = (elevacion, minimo, maximo) => {
+  if (!Number.isFinite(elevacion)) return PALETA_CURVAS[0];
+  const rango = maximo - minimo;
+  const posicion = rango > 0 ? Math.max(0, Math.min(1, (elevacion - minimo) / rango)) : 0.5;
+  const indice = posicion * (PALETA_CURVAS.length - 1);
+  const tramo = Math.min(Math.floor(indice), PALETA_CURVAS.length - 2);
+  const fraccion = indice - tramo;
+  const inicio = PALETA_CURVAS[tramo].match(/[A-Fa-f0-9]{2}/g).map((c) => parseInt(c, 16));
+  const fin = PALETA_CURVAS[tramo + 1].match(/[A-Fa-f0-9]{2}/g).map((c) => parseInt(c, 16));
+  const rgb = inicio.map((canal, i) => Math.round(canal + (fin[i] - canal) * fraccion));
+  return `#${rgb.map((canal) => canal.toString(16).padStart(2, '0')).join('')}`;
+};
+
 const placeholderSvg = (texto) =>
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
@@ -420,10 +428,9 @@ function FilaCapa({ capa, activa, onSelect, onQuitar, onDescargar }) {
       }} aria-pressed={activa}>
       <span className="gs-capa-text">
         <span className="gs-capa-name">{capa.nombre}</span>
-        <span className="gs-capa-meta">{capa.satelite}</span>
+        <span className="gs-capa-meta">{capa.satelite} · {capa.recortada ? 'Recortada' : 'Original'}</span>
       </span>
       <span className="gs-capa-actions">
-        <button className="gs-link" onClick={(e) => { e.stopPropagation(); onDescargar('geotiff'); }} title="Descargar GeoTIFF recortado">TIF</button>
         <button className="gs-icon-mini" onClick={(e) => { e.stopPropagation(); onQuitar(); }} title="Quitar capa" aria-label={`Quitar ${capa.nombre}`}>×</button>
       </span>
     </div>
@@ -631,9 +638,12 @@ export default function WorkspaceCore() {
   const selectorRef = useRef(null);
   const [fechasDefecto] = useState(obtenerFechasDefecto);
 
-  const [espacioActivo, setEspacioActivo] = useState('agricultura');
+  const espacioActivo = 'agricultura';
   const [seccionActiva, setSeccionActiva] = useState('imagenes');
   const [pestanaLote, setPestanaLote] = useState('capa');
+  const [equidistancia, setEquidistancia] = useState('5');
+  const [suavizadoCurvas, setSuavizadoCurvas] = useState(60);
+  const [generandoCurvas, setGenerandoCurvas] = useState(false);
 
   const [lotes, setLotes] = useState([]);
   const [loteAGuardarId, setLoteAGuardarId] = useState(null);
@@ -749,6 +759,12 @@ const limpiarFiltros = () => { setFiltroJ(FILTRO_VACIO); setFiltroAplicado(FILTR
   const [descargas, setDescargas] = useState([]);
 
   const loteActual = lotes.find((l) => l.id === loteActivoId) || null;
+  const rutaLote = loteActual
+  ? [
+      [loteActual.jerarquia?.org, loteActual.jerarquia?.est].map(nj).filter(Boolean).join(' › '),
+      [loteActual.cultivo, loteActual.campania].filter(Boolean).join(' · ')
+    ].filter(Boolean).join(' — ')
+  : '';
   const [eligioInicio, setEligioInicio] = useState(false);
   const mostrarGate = lotesListos && lotes.length === 0 && !eligioInicio && !modoDibujar
   && import.meta.env?.VITE_LOT_GATE !== 'false';
@@ -773,6 +789,7 @@ const limpiarFiltros = () => { setFiltroJ(FILTRO_VACIO); setFiltroAplicado(FILTR
   const capasLote = loteActual?.capas || [];
   const modoGestion = seccionActiva === 'lote' && !!loteActual && pestanaLote !== 'relieve';
   const capaAnalisis = capasLote.find((c) => c.id === capaAnalisisId) || null;
+  const capaObjetivo = capaAnalisis || capasLote[0] || null;
   const capasDisponibles = escenaActual?.esDem ? CAPAS_DEM : CAPAS;
   const ambientacion = loteActual?.ambientacion || null;
   const herramientaActiva = modoDibujar || modoMedir || modoIdentificar;
@@ -781,6 +798,12 @@ const limpiarFiltros = () => { setFiltroJ(FILTRO_VACIO); setFiltroAplicado(FILTR
   const distanciaMedida = distanciaTotalM(puntosMedicion);
   const cargandoCurva = !!capaAnalisis && curvaCalculandoId === capaAnalisis.id;
   const zonasVisibles = ambientacion?.visible !== false;
+  const cotasCurvas = [...new Set((loteActual?.curvas?.data?.features || [])
+    .map((f) => Number(f.properties?.elevacion))
+    .filter(Number.isFinite))]
+    .sort((a, b) => a - b);
+  const cotaMinCurvas = cotasCurvas[0] ?? 0;
+  const cotaMaxCurvas = cotasCurvas[cotasCurvas.length - 1] ?? 0;
 
   // Gráfico que se muestra ampliado sobre el espacio de trabajo (mapa)
   let curvaGrande = null;
@@ -812,15 +835,43 @@ const limpiarFiltros = () => { setFiltroJ(FILTRO_VACIO); setFiltroAplicado(FILTR
 
   const actualizarLote = (id, cambios) =>
     setLotes((prev) => prev.map((l) => (l.id === id ? { ...l, ...cambios } : l)));
+  const generarCurvas = async () => {
+    const eq = Number(String(equidistancia).replace(',', '.'));
+    if (!loteActual) return;
+    if (!(eq > 0)) { avisar('Indicá una equidistancia mayor que 0 (en metros).', 'info'); return; }
+    const loteId = loteActivoId;
+    setGenerandoCurvas(true);
+    try {
+      const res = await axios.post(`${API_BASE_URL}/curvas-nivel`, { geojson: loteActual.geojson, equidistancia: eq, suavizado: suavizadoCurvas / 100 });
+      actualizarLote(loteId, { curvas: { data: res.data, equidistancia: eq, suavizado: suavizadoCurvas, visible: true } });
+      avisar(`Curvas de nivel generadas: ${res.data.features.length} líneas cada ${eq} m.`, 'info');
+    } catch (err) {
+      avisar(await mensajeError(err, 'No se pudieron generar las curvas de nivel'));
+    } finally {
+      setGenerandoCurvas(false);
+    }
+  };
+
+  const descargarCurvas = (l) => {
+    const blob = new Blob([JSON.stringify(l.curvas.data)], { type: 'application/geo+json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${nombreSeguro(l.nombre)}_curvas_${l.curvas.equidistancia}m.geojson`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const descargarContornoGeoJSON = () => {
-  const blob = new Blob([JSON.stringify(loteActual.geojson)], { type: 'application/geo+json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${(loteActual.nombre || 'lote').replace(/[^\w.-]+/g, '_')}.geojson`;
-  a.click();
-  URL.revokeObjectURL(url);
-};
+    if (!loteActual) return;
+    const blob = new Blob([JSON.stringify(loteActual.geojson)], { type: 'application/geo+json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(loteActual.nombre || 'lote').replace(/[^\w.-]+/g, '_')}.geojson`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const avisar = useCallback((texto, tipo = 'error') => {
     setToast({ texto, tipo });
@@ -875,12 +926,6 @@ const limpiarFiltros = () => { setFiltroJ(FILTRO_VACIO); setFiltroAplicado(FILTR
     if (centrar && l.puntosCoords.length > 0) setCentroMapa({ coords: l.puntosCoords, t: Date.now() });
   };
 
-  const eliminarLote = (id, e) => {
-    e.stopPropagation();
-    const restantes = lotes.filter((l) => l.id !== id);
-    setLotes(restantes);
-    if (loteActivoId === id) activarLoteEstado(restantes[0] || null);
-  };
   const iniciarRenombrar = (l, e) => { e.stopPropagation(); setNombreEdicion(l.nombre); setEditandoId(l.id); };
 
 const confirmarRenombrar = async (l) => {
@@ -1064,6 +1109,18 @@ const borrarLote = async (l) => {
   const seleccionarEscena = async (escenaObj, modo = modoViz) => {
     if (!loteActual) return;
     const loteId = loteActivoId;
+    if (escenaActual?.id === escenaObj.id && loteActual.modoCapa === modo) {
+      peticionEscenaRef.current += 1;
+      setCargando(false);
+      setModoViz('RGB Clásico');
+      actualizarLote(loteId, {
+        escenaSeleccionada: null,
+        tileUrl: null,
+        vis: null,
+        modoCapa: null
+      });
+      return;
+    }
     const cambioEscena = escenaActual?.id !== escenaObj.id;
     const peticion = ++peticionEscenaRef.current;
     // el DEM solo admite sus propias capas, y las escenas satelitales no admiten las del DEM
@@ -1098,23 +1155,26 @@ const borrarLote = async (l) => {
   };
 
   // Sin argumentos exporta la capa activa; con { escenaId, modo } exporta otra (capa capturada o DEM)
-  const descargarRaster = async (formato, { escenaId, modo } = {}) => {
-    const escena = escenaId || escenaActual?.id;
-    if (!escena || !loteActual) return;
-    const modoFinal = modo || loteActual.modoCapa || modoViz;
-    setExportando(true);
-    try {
-      const res = await axios.post(`${API_BASE_URL}/descargar-raster`, {
-        escena_id: escena, modo_viz: modoFinal, geojson: loteActual.geojson,
-        formato, enmascarar_nubes: enmascararNubes
-      }, { responseType: 'blob' });
-      guardarBlob(res.data, `${nombreSeguro(loteActual.nombre)}_${nombreSeguro(modoFinal)}.${formato === 'png' ? 'png' : 'tif'}`);
-    } catch (err) {
-      avisar(await mensajeError(err, 'No se pudo exportar la capa'));
-    } finally {
-      setExportando(false);
-    }
-  };
+  const descargarRaster = async (formato, { escenaId, modo, recortar = true, lote: loteDestino } = {}) => {
+  const lote = loteDestino || loteActual;
+  const escena = escenaId || escenaActual?.id;
+  if (!escena || !lote) return;
+  const modoFinal = modo || lote.modoCapa || modoViz;
+  setExportando(true);
+  try {
+    const res = await axios.post(`${API_BASE_URL}/descargar-raster`, {
+      escena_id: escena, modo_viz: modoFinal, geojson: lote.geojson,
+      formato, enmascarar_nubes: enmascararNubes,
+      recortar,               // true: máscara del polígono del lote; false: sin máscara
+      resolucion_nativa: true // siempre a la resolución original de la fuente
+    }, { responseType: 'blob' });
+    guardarBlob(res.data, `${nombreSeguro(lote.nombre)}_${nombreSeguro(modoFinal)}${recortar ? '_recorte' : '_original'}.${formato === 'png' ? 'png' : 'tif'}`);
+  } catch (err) {
+    avisar(await mensajeError(err, 'No se pudo exportar la capa'));
+  } finally {
+    setExportando(false);
+  }
+};
 
   // ---------- Captura de capas del lote ----------
   const capturarCapa = async () => {
@@ -1128,25 +1188,28 @@ const borrarLote = async (l) => {
       avisar('Esa capa ya está capturada para este lote.', 'info');
       return;
     }
+    const tileOriginal = loteActual.tileUrl;
+    const escena = escenaActual;
     setCapturando(true);
     try {
       const res = await axios.post(`${API_BASE_URL}/capturar-capa`, {
-        escena_id: escenaActual.id, modo_viz: modo, geojson: loteActual.geojson, enmascarar_nubes: enmascararNubes
+        escena_id: escena.id, modo_viz: modo, geojson: loteActual.geojson, enmascarar_nubes: enmascararNubes
       });
       const capa = {
         id: nuevoId('capa'),
-        nombre: `${modo} · ${escenaActual.fecha || ''}`,
-        modo,
-        escenaId: escenaActual.id,
-        fecha: escenaActual.fecha || '',
-        satelite: escenaActual.satelite || '',
-        tileUrl: res.data.tile_url,
-        vis: res.data.vis,
-        stats: res.data.stats,
-        visible: false // encendida en el mapa (se maneja desde el panel izquierdo)
+        nombre: `${modo} · ${escena.fecha || ''}`,
+        modo, escenaId: escena.id, escena,
+        fecha: escena.fecha || '', satelite: escena.satelite || '',
+        tileUrlOriginal: tileOriginal,
+        tileUrlRecorte: res.data.tile_url,
+        tileUrl: tileOriginal,
+        recortada: false,
+        vis: res.data.vis, stats: res.data.stats,
+        visible: true
       };
-      setLotes((prev) => prev.map((l) => (l.id !== loteId ? l : { ...l, capas: [...(l.capas || []), capa] })));
-      avisar(`Capa "${capa.nombre}" capturada y recortada al lote.`, 'info');
+      setLotes((prev) => prev.map((l) => (l.id !== loteId ? l : { ...l, capas: [capa, ...(l.capas || [])] })));
+      seleccionarCapaAnalisis(capa);
+      avisar(`Capa "${capa.nombre}" capturada.`, 'info');
     } catch (err) {
       avisar(await mensajeError(err, 'No se pudo capturar la capa'));
     } finally {
@@ -1160,7 +1223,15 @@ const borrarLote = async (l) => {
     cambiarCapas((cs) => cs.filter((c) => c.id !== id));
     if (capaAnalisisId === id) setCapaAnalisisId(null);
   };
-
+  const alternarRecorte = (capa) => {
+  if (!capa.tileUrlOriginal || !capa.tileUrlRecorte) {
+    avisar('Esta capa se capturó antes de este cambio. Quitala y volvé a capturarla para poder recortarla y restaurarla.', 'info');
+    return;
+  }
+  cambiarCapas((cs) => cs.map((c) => (c.id !== capa.id ? c : c.recortada
+    ? { ...c, recortada: false, tileUrl: c.tileUrlOriginal }
+    : { ...c, recortada: true, tileUrl: c.tileUrlRecorte })));
+};
   // Al elegir una capa para analizar, la curva propone el período que termina un mes después de su fecha
   const seleccionarCapaAnalisis = (capa) => {
     if (capa.id === capaAnalisisId) return;
@@ -1728,19 +1799,7 @@ const borrarLote = async (l) => {
     }}
   />
 )}
-{loteAConfirmar && !loteAGuardar && (
-  <div className="gx-prompt" role="dialog" aria-labelledby="gx-prompt-t">
-    <div>
-      <strong id="gx-prompt-t">¿Querés guardar este lote en tu cuenta?</strong>
-      <span>{loteAConfirmar.nombre} · {formatoHa(loteAConfirmar.superficieHa)} ha</span>
-    </div>
-    <div className="gx-prompt-actions">
-      <button className="gx-prompt-btn" onClick={() => setLoteAConfirmarId(null)}>Ahora no</button>
-      <button className="gx-prompt-btn primary" autoFocus
-        onClick={() => { setLoteAGuardarId(loteAConfirmar.id); setLoteAConfirmarId(null); }}>Guardar lote</button>
-    </div>
-  </div>
-)}
+
     {mostrarGate && (
   <FirstLotGate
     onImport={() => { setEligioInicio(true); fileInputRef.current?.click(); }}
@@ -1789,33 +1848,7 @@ const borrarLote = async (l) => {
 
       <div className="gs-body">
         <Sidebar>
-<div className="gs-workspace">
-  <div className="gs-label">Lote activo</div>
-  {loteActual ? (
-    <div className="gx-lotecard">
-      <div className="gx-lotecard-name" title={loteActual.nombre}>{loteActual.nombre}</div>
-      <div className="gx-lotecard-meta">{formatoHa(loteActual.superficieHa)} ha · {loteActual.origen}</div>
-      {loteActual.jerarquia && (
-        <div className="gx-lotecard-path">
-          {[loteActual.jerarquia.org, loteActual.jerarquia.est]
-            .filter(Boolean).map((e) => e.nombre ?? e.name).join(' › ')}
-        </div>
-      )}
-      {(loteActual.cultivo || loteActual.campania) && (
-  <div className="gx-lotecard-path">{[loteActual.cultivo, loteActual.campania].filter(Boolean).join(' · ')}</div>
-)}
-      <div className="gx-lotecard-actions">
-        <button className="gx-mini" onClick={() => setCentroMapa({ coords: loteActual.puntosCoords, t: Date.now() })}>Centrar</button>
-        {loteActual.guardado
-          ? <span className="gx-badge ok">Guardado</span>
-          : <button className="gx-mini primary" onClick={() => setLoteAGuardarId(loteActual.id)}>Guardar lote</button>}
-      </div>
-    </div>
-  ) : (
-    <div className="gx-lotecard empty">Dibujá o importá un área para comenzar.</div>
-  )}
-</div>
-
+          
           <nav className="gs-nav" aria-label={`Secciones de ${espacioActivo}`}>
             {(NAV_ESPACIO[espacioActivo] || []).map((grupo, gi) => (
               <React.Fragment key={grupo.titulo}>
@@ -1849,6 +1882,13 @@ const borrarLote = async (l) => {
                             <span>Zonas de manejo · {ambientacion.indice}</span>
                           </label>
                         )}
+                        {loteActual.curvas && (
+                          <label className="gs-tree-item" title="Curvas de nivel">
+                            <input type="checkbox" checked={loteActual.curvas.visible}
+                              onChange={() => actualizarLote(loteActual.id, { curvas: { ...loteActual.curvas, visible: !loteActual.curvas.visible } })} />
+                            <span>Curvas de nivel · {loteActual.curvas.equidistancia} m</span>
+                          </label>
+                        )}
                       </div>
                     )}
                     </React.Fragment>
@@ -1873,7 +1913,20 @@ const borrarLote = async (l) => {
               {!modoGestion && loteActual?.tileUrl && <TileLayer url={loteActual.tileUrl} opacity={0.86} />}
               {zonasVisibles && ambientacion?.tileUrl && <TileLayer url={ambientacion.tileUrl} opacity={opacidadAmbientacion / 100} />}
               {zonasVisibles && ambientacion?.bordesUrl && <TileLayer url={ambientacion.bordesUrl} opacity={0.95} />}
-              {capasLote.filter((c) => c.visible).map((c) => <TileLayer key={c.id} url={c.tileUrl} opacity={0.92} />)}
+              {capasLote.filter((c) => c.visible).map((c) => (
+                <TileLayer key={`${c.id}-${c.recortada ? 'r' : 'o'}`} url={c.tileUrl} opacity={0.92}
+                  zIndex={300 + capasLote.length - capasLote.indexOf(c)} />
+              ))}
+              {loteActual?.curvas?.visible && (
+                <GeoJSON
+                  key={`curvas-${loteActual.id}-${loteActual.curvas.equidistancia}-${loteActual.curvas.suavizado}-${loteActual.curvas.data.features.length}`}
+                  data={loteActual.curvas.data} interactive={false}
+                  style={(f) => ({
+                    color: colorCurva(Number(f.properties?.elevacion), cotaMinCurvas, cotaMaxCurvas),
+                    weight: f.properties?.indice ? 2.8 : 1.8,
+                    opacity: 1
+                  })} />
+              )}
               {lotes.filter((l) => !modoGestion || l.id === loteActivoId).map((l) => l.contornos.map((anillo, i) => (
                 <Polygon
                   key={`${l.id}-${i}`}
@@ -1913,7 +1966,7 @@ const borrarLote = async (l) => {
                     <span className="gs-lote-trigger-text">
                       <span className="gs-map-title-main">{loteActual ? etiquetaLote(loteActual) : 'Vista general del territorio'}</span>
                       <span className="gs-map-title-sub">
-                        {loteActual ? <>{`${formatoHa(loteActual.superficieHa)} ha · ${modoGestion ? 'gestión de lote' : 'espacio de trabajo activo'}`}{!loteActual.guardado && <span className="gx-badge">Sin guardar</span>}</> : 'Seleccioná o importá un área para comenzar'}
+                        {loteActual ? <>{`${formatoHa(loteActual.superficieHa)} ha · ${modoGestion ? 'gestión de lote' : 'espacio de trabajo activo'}`}{!loteActual.guardado && <span className="gx-badge">Sin guardar</span>}{rutaLote && <span className="gx-title-path">{rutaLote}</span>}</> : 'Seleccioná o importá un área para comenzar'}
                       </span>
                     </span>
                     {lotes.length > 1 && <span className="gs-lote-chevron" aria-hidden="true">▾</span>}
@@ -1955,10 +2008,16 @@ const borrarLote = async (l) => {
               )}
               {loteActual && !loteActual.guardado && (
              <div className="gs-capturar">
-              <button className="gs-chip-btn primary" onClick={() => setLoteAGuardarId(loteActual.id)}>Guardar lote</button>
               </div>
               )}
-              {loteActual && !modoGestion && (
+              {loteActual && seccionActiva === 'lote' && capaObjetivo && (
+                <div className="gs-capturar">
+                  <button className="gs-chip-btn primary" onClick={() => alternarRecorte(capaObjetivo)}>
+                    {capaObjetivo.recortada ? 'Restaurar capa' : 'Recortar capa'}
+                  </button>
+                </div>
+              )}
+              {loteActual && !modoGestion && seccionActiva !== 'lote' && (
                 <div className="gs-capturar">
                   <button
                     className="gs-chip-btn primary"
@@ -2001,6 +2060,19 @@ const borrarLote = async (l) => {
           {!modoGestion && !mostrarCurva && loteActual?.vis?.palette && <LeyendaIndice titulo={loteActual.modoCapa} vis={loteActual.vis} />}
 
           {mostrarCurva && <PanelCurva {...curvaGrande} onCerrar={() => setCurvaAbierta(false)} />}
+            {loteAConfirmar && !loteAGuardar && (
+            <div className="gx-prompt" role="dialog" aria-labelledby="gx-prompt-t">
+              <div>
+                <strong id="gx-prompt-t">¿Querés guardar este lote en tu cuenta?</strong>
+                <span>{loteAConfirmar.nombre} · {formatoHa(loteAConfirmar.superficieHa)} ha</span>
+              </div>
+              <div className="gx-prompt-actions">
+                <button className="gx-prompt-btn" onClick={() => setLoteAConfirmarId(null)}>Ahora no</button>
+                <button className="gx-prompt-btn primary" autoFocus
+                  onClick={() => { setLoteAGuardarId(loteAConfirmar.id); setLoteAConfirmarId(null); }}>Guardar lote</button>
+              </div>
+            </div>
+          )}
             {loteActual && !modoGestion && !mostrarCurva && !modoDibujar && (() => {
   const ordenadas = [...loteActual.escenas].sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
   const idx = ordenadas.findIndex((e) => e.id === escenaActual?.id);
@@ -2154,39 +2226,7 @@ const borrarLote = async (l) => {
                         : 'Ejecutá una búsqueda para consultar el catálogo satelital.'}
                      </div>
                     </div>
-
-                  <div className="gs-section">
-                    <div className="gs-section-head"><span className="gs-section-title">Terreno · DEM SRTM</span><span className="gs-section-note">30 m</span></div>
-                    <div className={`gs-scene ${escenaActual?.esDem ? 'active' : ''}`} onClick={() => seleccionarEscena(ESCENA_SRTM, 'Elevación')}>
-                      <div className="gs-scene-top">
-                        <div className="gs-scene-thumb"><img src={placeholderSvg('SRTM · DEM')} alt="" /></div>
-                        <div className="gs-scene-info">
-                          <div className="gs-scene-date">Modelo digital de elevación</div>
-                          <div className="gs-scene-sat">SRTM · NASA/USGS · 30 m</div>
-                          <div className="gs-scene-meta">
-                            <span className="gs-scene-chip">Elevación</span>
-                            <span className="gs-scene-chip">Pendiente</span>
-                            <span className="gs-scene-chip">Relieve</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="gs-scene-footer">
-                        <span className="gs-scene-status">{escenaActual?.esDem ? '✓ Visualización activa' : 'Ver sobre el lote'}</span>
-                        <span style={{ display: 'flex', gap: 10 }}>
-                          {['geotiff', 'png'].map((f) => (
-                            <button
-                              key={f}
-                              className="gs-link"
-                              disabled={exportando}
-                              onClick={(ev) => { ev.stopPropagation(); descargarRaster(f, { escenaId: SRTM_ID, modo: escenaActual?.esDem ? loteActual.modoCapa : 'Elevación' }); }}
-                            >{f === 'geotiff' ? 'GeoTIFF' : 'PNG'}</button>
-                          ))}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="gs-note">Se visualiza completo; al descargar o capturar se recorta al límite del lote.</div>
-                  </div>
-                </>
+                  </>
               )}
             </div>
           )}
@@ -2387,27 +2427,54 @@ const borrarLote = async (l) => {
                   </div>
               )}
               {pestanaLote === 'relieve' && (
-                <div className="gs-section">
-                  <div className="gs-section-head"><span className="gs-section-title">Relieve · DEM SRTM</span><span className="gs-section-note">30 m</span></div>
-                  <div className="gs-note" style={{ marginTop: 0, marginBottom: 10 }}>Se visualiza completo sobre el mapa; al descargar o capturar se recorta al límite del lote.</div>
-                  {['Elevación', 'Pendiente', 'Sombreado'].map((m) => {
-                    const activo = !!escenaActual?.esDem && loteActual.modoCapa === m;
-                    return (
-                      <div className={`gs-scene ${activo ? 'active' : ''}`} key={m}>
-                        <button type="button" className="gx-relieve-main" aria-pressed={activo} onClick={() => seleccionarEscena(ESCENA_SRTM, m)}>
-                          <strong>{m}</strong>
-                          <span>{activo ? '✓ Visualización activa' : 'Ver sobre el lote'}</span>
-                        </button>
-                        <span className="gx-relieve-dl">
-                          {['geotiff', 'png'].map((f) => (
-                            <button key={f} className="gs-link" disabled={exportando} onClick={() => descargarRaster(f, { escenaId: SRTM_ID, modo: m })}>{f === 'geotiff' ? 'GeoTIFF' : 'PNG'}</button>
+                <>
+                  <div className="gs-section">
+                    <div className="gs-section-head"><span className="gs-section-title">Relieve · DEM SRTM</span><span className="gs-section-note">30 m</span></div>
+                    <div className="gs-note" style={{ marginTop: 0, marginBottom: 10 }}>Se visualiza completo sobre el mapa. Al capturarlo se agrega a las capas del lote.</div>
+                    {['Elevación', 'Pendiente', 'Sombreado'].map((m) => {
+                      const activo = !!escenaActual?.esDem && loteActual.modoCapa === m;
+                      return (
+                        <div className={`gs-scene ${activo ? 'active' : ''}`} key={m}>
+                          <button type="button" className="gx-relieve-main" aria-pressed={activo} onClick={() => seleccionarEscena(ESCENA_SRTM, m)}>
+                            <strong>{m}</strong>
+                            <span>{activo ? '✓ Visualización activa · clic para desactivar' : 'Ver sobre el lote'}</span>
+                          </button>
+                          <span className="gx-relieve-dl">
+                            <button className="gs-link" disabled={!activo || capturando} onClick={capturarCapa}>{capturando && activo ? 'Capturando…' : 'Capturar capa'}</button>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="gs-section">
+                    <div className="gs-section-head"><span className="gs-section-title">Curvas de nivel</span>{loteActual.curvas && <span className="gs-section-note">{loteActual.curvas.data.features.length} líneas</span>}</div>
+                    {loteActual.curvas?.data?.features?.length > 0 && (
+                      <div className="gs-note" style={{ marginTop: 0, marginBottom: 10 }}>
+                        <div>Cota por curva (m)</div>
+                        <div role="list" aria-label="Colores y cotas de las curvas"
+                          style={{ display: 'flex', overflowX: 'auto', padding: '5px 0 3px', gap: 1 }}>
+                          {cotasCurvas.map((cota) => (
+                            <div role="listitem" key={cota} title={`Cota ${cota} m`}
+                              style={{ flex: '0 0 42px', textAlign: 'center' }}>
+                              <div style={{ height: 8, background: colorCurva(cota, cotaMinCurvas, cotaMaxCurvas) }} />
+                              <span style={{ display: 'block', marginTop: 3, whiteSpace: 'nowrap' }}>{cota.toLocaleString('es-AR')}</span>
+                            </div>
                           ))}
-                        </span>
+                        </div>
                       </div>
-                    );
-                  })}
-                  <div className="gs-note">Para guardar el relieve como capa del lote usá “Capturar capa” sobre el mapa.</div>
-                </div>
+                    )}
+                    <div className="gs-field"><label htmlFor="cn-eq">EQUIDISTANCIA (m)</label>
+                      <input id="cn-eq" className="gs-input" type="number" min="0.5" step="0.5" value={equidistancia} onChange={(e) => setEquidistancia(e.target.value)} />
+                    </div>
+                    <div className="gs-field"><label htmlFor="cn-suav">SUAVIZADO</label>
+                      <div className="gs-slider-row"><input id="cn-suav" type="range" min="0" max="100" value={suavizadoCurvas} onChange={(e) => setSuavizadoCurvas(Number(e.target.value))} /><span className="gs-pill">{suavizadoCurvas}%</span></div>
+                    </div>
+                    <button className="gs-primary" style={{ width: '100%' }} onClick={generarCurvas} disabled={generandoCurvas}>
+                      {generandoCurvas ? 'Generando…' : loteActual.curvas ? 'Regenerar curvas de nivel' : 'Generar curvas de nivel'}
+                    </button>
+                    <div className="gs-note">Se calculan sobre el DEM SRTM recortado al lote. Cada 5.ª curva se dibuja más gruesa; los colores y cotas se consultan en la escala del panel. Con equidistancias menores a 2–3 m se ve más el ruido del SRTM que el terreno real.</div>
+                  </div>
+                </>
               )}
               {pestanaLote === 'exportar' && (
                 <>
@@ -2590,7 +2657,58 @@ const borrarLote = async (l) => {
 
           {seccionActiva === 'descargas' && (
             <div className="gs-inspector-scroll">
-              <div className="gs-section-head"><span className="gs-section-title">Productos solicitados</span><span className="gs-section-note">{descargas.length}</span></div>
+              {lotes.filter((l) => (l.capas || []).length > 0 || l.curvas).length === 0 && (
+            <div className="gs-empty"><strong>Sin capas capturadas</strong>Capturá capas desde “Imágenes satelitales” o “Relieve” para descargarlas acá.</div>
+          )}
+          {[...lotes]
+            .sort((a, b) => (a.id === loteActivoId ? -1 : b.id === loteActivoId ? 1 : 0))
+            .filter((l) => (l.capas || []).length > 0 || l.curvas)
+            .map((l) => (
+              <div className="gs-section" key={l.id}>
+                <div className="gs-section-head">
+                  <span className="gs-section-title">{etiquetaLote(l)}</span>
+                  <span className="gs-section-note">{(l.capas || []).length} capas{l.id === loteActivoId ? ' · activo' : ''}</span>
+                </div>
+                {(l.capas || []).map((c) => {
+                  const esDem = MODOS_DEM.includes(c.modo);
+                  const landsat = !!c.escena && familiaDe(c.escena) === 'Landsat';
+                  return (
+                    <div className="gx-exp-capa" key={c.id}>
+                      <div className="gx-exp-nombre" title={c.nombre}>{c.nombre}</div>
+                      <div className="gx-exp-opcion">
+                        <span>Recorte al lote · resolución original</span>
+                        <span>
+                          {['geotiff', 'png'].map((f) => (
+                            <button key={f} className="gs-link" disabled={exportando}
+                              onClick={() => descargarRaster(f, { lote: l, escenaId: c.escenaId, modo: c.modo, recortar: true })}>{f === 'geotiff' ? 'GeoTIFF' : 'PNG'}</button>
+                          ))}
+                        </span>
+                      </div>
+                      <div className="gx-exp-opcion">
+                        <span>Original nativo</span>
+                        <span>
+                          {esDem ? (
+                            <button className="gs-link" disabled={exportando}
+                              onClick={() => descargarRaster('geotiff', { lote: l, escenaId: c.escenaId, modo: c.modo, recortar: false })}>GeoTIFF</button>
+                          ) : (
+                            <button className="gs-link" disabled={landsat || !c.escena}
+                              title={landsat ? 'La descarga de Landsat todavía no está disponible' : 'Escena completa, con selección de bandas'}
+                              onClick={() => abrirModalDescargaEscena(c.escena, { stopPropagation() {} })}>Escena completa…</button>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+                {l.curvas && (
+                  <div className="gx-exp-capa">
+                    <div className="gx-exp-nombre">Curvas de nivel · {l.curvas.equidistancia} m</div>
+                    <div className="gx-exp-opcion"><span>Vector</span><span><button className="gs-link" onClick={() => descargarCurvas(l)}>GeoJSON</button></span></div>
+                  </div>
+                )}
+              </div>
+            ))}
+              <div className="gs-section-head" style={{ marginTop: 18 }}><span className="gs-section-title">Productos solicitados</span><span className="gs-section-note">{descargas.length}</span></div>
               {descargas.length === 0 ? (
                 <div className="gs-empty"><strong>No hay descargas</strong>Los productos que solicites desde una escena aparecerán aquí.</div>
               ) : descargas.map((d) => (
